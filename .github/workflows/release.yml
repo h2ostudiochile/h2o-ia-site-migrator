@@ -65,6 +65,8 @@ jobs:
         run: |
           echo '--- CSS layout rules ---'
           grep -nE 'full|bleed|inner|section|content|hero|blog' work/h2o-ia-site-migrator/assets/frontend.css | head -n 220 || true
+          echo '--- CSS 1.0.4 tail ---'
+          sed -n '72,95p' work/h2o-ia-site-migrator/assets/frontend.css || true
           echo '--- Profile layout markers ---'
           grep -nE 'full_width|stretch_row|h2osm-|blog|hero|section' work/h2o-ia-site-migrator/profiles/templa-design.php | head -n 260 || true
 
