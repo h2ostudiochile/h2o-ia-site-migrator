@@ -48,99 +48,99 @@ jobs:
           sed -i 's/15 \* MINUTE_IN_SECONDS/2 * MINUTE_IN_SECONDS/g' "$ROOT/includes/class-updater.php" || true
 
           cat >> "$ROOT/assets/frontend.css" <<'CSS'
-
-/* 1.0.5 — restore canonical Salient row geometry.
-   Visual rows: full width content.
-   Editorial rows: full width background, centered content container. */
-.h2osm-managed-page .h2osm-site>.h2osm-hero-row,
-.h2osm-managed-page .h2osm-site>.h2osm-visual-row,
-.h2osm-managed-page .h2osm-site>.h2osm-video-row,
-.h2osm-managed-page .h2osm-site>.h2osm-fullbleed{
-  width:100vw!important;
-  max-width:none!important;
-  margin-left:calc(50% - 50vw)!important;
-  margin-right:calc(50% - 50vw)!important;
-  padding-left:0!important;
-  padding-right:0!important;
-}
-.h2osm-managed-page .h2osm-hero,
-.h2osm-managed-page .h2osm-subhero,
-.h2osm-managed-page .h2osm-video{
-  width:100vw!important;
-  max-width:none!important;
-  margin-left:calc(50% - 50vw)!important;
-  margin-right:calc(50% - 50vw)!important;
-}
-.h2osm-managed-page .h2osm-site>.h2osm-section,
-.h2osm-managed-page .h2osm-site>.h2osm-service-grid,
-.h2osm-managed-page .h2osm-site>.h2osm-project-grid,
-.h2osm-managed-page .h2osm-site>.h2osm-salient-blog-row,
-.h2osm-managed-page .h2osm-site>.h2osm-value-grid,
-.h2osm-managed-page .h2osm-site>.h2osm-service-detail-grid,
-.h2osm-managed-page .h2osm-site>.h2osm-project-categories,
-.h2osm-managed-page .h2osm-site>.h2osm-before-after,
-.h2osm-managed-page .h2osm-site>.h2osm-page-title,
-.h2osm-managed-page .h2osm-site>.h2osm-contact-hero,
-.h2osm-managed-page .h2osm-site>.h2osm-contact-grid{
-  width:100vw!important;
-  max-width:none!important;
-  margin-left:calc(50% - 50vw)!important;
-  margin-right:calc(50% - 50vw)!important;
-  padding-left:0!important;
-  padding-right:0!important;
-}
-.h2osm-managed-page .h2osm-site>.h2osm-section>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-service-grid>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-project-grid>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-salient-blog-row>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-value-grid>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-service-detail-grid>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-project-categories>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-before-after>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-page-title>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-contact-hero>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-contact-grid>.row_col_wrap_12{
-  width:100%!important;
-  max-width:var(--h2osm-max)!important;
-  margin-left:auto!important;
-  margin-right:auto!important;
-  padding-left:32px!important;
-  padding-right:32px!important;
-}
-.h2osm-managed-page .h2osm-site>.h2osm-service-grid>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-project-grid>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-value-grid>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-service-detail-grid>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-project-categories>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-before-after>.row_col_wrap_12,
-.h2osm-managed-page .h2osm-site>.h2osm-contact-grid>.row_col_wrap_12{
-  display:flex!important;
-  flex-wrap:wrap!important;
-}
-.h2osm-managed-page .h2osm-site>.h2osm-section.h2osm-section-dark,
-.h2osm-managed-page .h2osm-site>.h2osm-service-grid.h2osm-section-dark{
-  background:var(--h2osm-black)!important;
-}
-.h2osm-managed-page .h2osm-site>.h2osm-section.h2osm-section-cream,
-.h2osm-managed-page .h2osm-site>.h2osm-value-grid.h2osm-section-cream{
-  background:var(--h2osm-cream)!important;
-}
-@media(max-width:760px){
-  .h2osm-managed-page .h2osm-site>.h2osm-section>.row_col_wrap_12,
-  .h2osm-managed-page .h2osm-site>.h2osm-service-grid>.row_col_wrap_12,
-  .h2osm-managed-page .h2osm-site>.h2osm-project-grid>.row_col_wrap_12,
-  .h2osm-managed-page .h2osm-site>.h2osm-salient-blog-row>.row_col_wrap_12,
-  .h2osm-managed-page .h2osm-site>.h2osm-value-grid>.row_col_wrap_12,
-  .h2osm-managed-page .h2osm-site>.h2osm-service-detail-grid>.row_col_wrap_12,
-  .h2osm-managed-page .h2osm-site>.h2osm-project-categories>.row_col_wrap_12,
-  .h2osm-managed-page .h2osm-site>.h2osm-before-after>.row_col_wrap_12,
-  .h2osm-managed-page .h2osm-site>.h2osm-page-title>.row_col_wrap_12,
-  .h2osm-managed-page .h2osm-site>.h2osm-contact-hero>.row_col_wrap_12,
-  .h2osm-managed-page .h2osm-site>.h2osm-contact-grid>.row_col_wrap_12{
-    padding-left:18px!important;
-    padding-right:18px!important;
-  }
-}
+          
+          /* 1.0.5 — restore canonical Salient row geometry.
+             Visual rows: full width content.
+             Editorial rows: full width background, centered content container. */
+          .h2osm-managed-page .h2osm-site>.h2osm-hero-row,
+          .h2osm-managed-page .h2osm-site>.h2osm-visual-row,
+          .h2osm-managed-page .h2osm-site>.h2osm-video-row,
+          .h2osm-managed-page .h2osm-site>.h2osm-fullbleed{
+            width:100vw!important;
+            max-width:none!important;
+            margin-left:calc(50% - 50vw)!important;
+            margin-right:calc(50% - 50vw)!important;
+            padding-left:0!important;
+            padding-right:0!important;
+          }
+          .h2osm-managed-page .h2osm-hero,
+          .h2osm-managed-page .h2osm-subhero,
+          .h2osm-managed-page .h2osm-video{
+            width:100vw!important;
+            max-width:none!important;
+            margin-left:calc(50% - 50vw)!important;
+            margin-right:calc(50% - 50vw)!important;
+          }
+          .h2osm-managed-page .h2osm-site>.h2osm-section,
+          .h2osm-managed-page .h2osm-site>.h2osm-service-grid,
+          .h2osm-managed-page .h2osm-site>.h2osm-project-grid,
+          .h2osm-managed-page .h2osm-site>.h2osm-salient-blog-row,
+          .h2osm-managed-page .h2osm-site>.h2osm-value-grid,
+          .h2osm-managed-page .h2osm-site>.h2osm-service-detail-grid,
+          .h2osm-managed-page .h2osm-site>.h2osm-project-categories,
+          .h2osm-managed-page .h2osm-site>.h2osm-before-after,
+          .h2osm-managed-page .h2osm-site>.h2osm-page-title,
+          .h2osm-managed-page .h2osm-site>.h2osm-contact-hero,
+          .h2osm-managed-page .h2osm-site>.h2osm-contact-grid{
+            width:100vw!important;
+            max-width:none!important;
+            margin-left:calc(50% - 50vw)!important;
+            margin-right:calc(50% - 50vw)!important;
+            padding-left:0!important;
+            padding-right:0!important;
+          }
+          .h2osm-managed-page .h2osm-site>.h2osm-section>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-service-grid>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-project-grid>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-salient-blog-row>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-value-grid>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-service-detail-grid>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-project-categories>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-before-after>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-page-title>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-contact-hero>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-contact-grid>.row_col_wrap_12{
+            width:100%!important;
+            max-width:var(--h2osm-max)!important;
+            margin-left:auto!important;
+            margin-right:auto!important;
+            padding-left:32px!important;
+            padding-right:32px!important;
+          }
+          .h2osm-managed-page .h2osm-site>.h2osm-service-grid>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-project-grid>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-value-grid>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-service-detail-grid>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-project-categories>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-before-after>.row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site>.h2osm-contact-grid>.row_col_wrap_12{
+            display:flex!important;
+            flex-wrap:wrap!important;
+          }
+          .h2osm-managed-page .h2osm-site>.h2osm-section.h2osm-section-dark,
+          .h2osm-managed-page .h2osm-site>.h2osm-service-grid.h2osm-section-dark{
+            background:var(--h2osm-black)!important;
+          }
+          .h2osm-managed-page .h2osm-site>.h2osm-section.h2osm-section-cream,
+          .h2osm-managed-page .h2osm-site>.h2osm-value-grid.h2osm-section-cream{
+            background:var(--h2osm-cream)!important;
+          }
+          @media(max-width:760px){
+            .h2osm-managed-page .h2osm-site>.h2osm-section>.row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site>.h2osm-service-grid>.row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site>.h2osm-project-grid>.row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site>.h2osm-salient-blog-row>.row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site>.h2osm-value-grid>.row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site>.h2osm-service-detail-grid>.row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site>.h2osm-project-categories>.row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site>.h2osm-before-after>.row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site>.h2osm-page-title>.row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site>.h2osm-contact-hero>.row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site>.h2osm-contact-grid>.row_col_wrap_12{
+              padding-left:18px!important;
+              padding-right:18px!important;
+            }
+          }
           CSS
 
           {
@@ -171,26 +171,26 @@ jobs:
           split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/part-"
 
           node - "$VERSION" "$SHA" <<'NODE'
-          const fs = require('fs');
-          const [version, sha] = process.argv.slice(2);
-          const files = fs.readdirSync('dist/parts').sort();
-          const parts = files.map(f => 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/' + version + '/' + f + '.b64');
-          const manifest = {
-            version,
-            package_id: 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256',
-            package_sha256: sha,
-            parts,
-            tested: '7.1',
-            requires_php: '8.0'
-          };
-          fs.writeFileSync('dist/release-bootstrap.json', JSON.stringify(manifest, null, 2) + '\n');
-          fs.writeFileSync('dist/release.json', JSON.stringify({
-            version,
-            package_url: 'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v' + version + '/h2o-ia-site-migrator-' + version + '.zip',
-            package_sha256: sha,
-            tested: '7.1',
-            requires_php: '8.0'
-          }, null, 2) + '\n');
+                    const fs = require('fs');
+                    const [version, sha] = process.argv.slice(2);
+                    const files = fs.readdirSync('dist/parts').sort();
+                    const parts = files.map(f => 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/' + version + '/' + f + '.b64');
+                    const manifest = {
+                      version,
+                      package_id: 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256',
+                      package_sha256: sha,
+                      parts,
+                      tested: '7.1',
+                      requires_php: '8.0'
+                    };
+                    fs.writeFileSync('dist/release-bootstrap.json', JSON.stringify(manifest, null, 2) + '\n');
+                    fs.writeFileSync('dist/release.json', JSON.stringify({
+                      version,
+                      package_url: 'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v' + version + '/h2o-ia-site-migrator-' + version + '.zip',
+                      package_sha256: sha,
+                      tested: '7.1',
+                      requires_php: '8.0'
+                    }, null, 2) + '\n');
           NODE
 
       - name: Publish GitHub Release
