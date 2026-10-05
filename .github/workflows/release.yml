@@ -64,12 +64,12 @@ jobs:
 
           p = re.sub(
               r"\$nav\s*=\s*static function \(\) use \( \$logo \): string \{.*?\n\};",
-              "\$nav = static function (): string { return ''; };",
+              lambda _m: "$nav = static function (): string { return ''; };",
               p, count=1, flags=re.S
           )
           p = re.sub(
               r"\$footer\s*=\s*static function \(\): string \{.*?\n\};",
-              "\$footer = static function (): string { return ''; };",
+              lambda _m: "$footer = static function (): string { return ''; };",
               p, count=1, flags=re.S
           )
 
