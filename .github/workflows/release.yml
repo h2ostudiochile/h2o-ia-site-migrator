@@ -23,130 +23,92 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build 1.0.7 editorial container fix
+      - name: Build 1.0.8 native Salient structure fix
         shell: bash
         run: |
           set -euo pipefail
 
-          BASE_VERSION="1.0.6"
-          VERSION="1.0.7"
+          BASE_VERSION="1.0.7"
+          VERSION="1.0.8"
           WORK="$RUNNER_TEMP/h2osm-$VERSION"
           DIST="$GITHUB_WORKSPACE/dist"
 
           rm -rf "$WORK" "$DIST"
-          mkdir -p "$WORK/current" "$DIST/parts"
+          mkdir -p "$WORK/current" "$WORK/good" "$DIST/parts"
 
+          # Current plugin.
           cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
           unzip -q "$WORK/current.zip" -d "$WORK/current"
           ROOT="$WORK/current/h2o-ia-site-migrator"
 
-          cat >> "$ROOT/assets/frontend.css" <<'CSS'
+          # Restore pre-1.0.7 CSS baseline. Native Salient will own row/container geometry.
+          cat bootstrap/1.0.6/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/good.zip"
+          unzip -q "$WORK/good.zip" -d "$WORK/good"
+          cp "$WORK/good/h2o-ia-site-migrator/assets/frontend.css" "$ROOT/assets/frontend.css"
 
-          /* 1.0.7 — Salient Full Width Background semantics.
-             The row/background spans the viewport; editorial content stays in the site container.
-             No 100vw translations are used here. */
-          .h2osm-managed-page .h2osm-site > .h2osm-section,
-          .h2osm-managed-page .h2osm-site > .h2osm-service-grid,
-          .h2osm-managed-page .h2osm-site > .h2osm-project-grid,
-          .h2osm-managed-page .h2osm-site > .h2osm-salient-blog-row,
-          .h2osm-managed-page .h2osm-site > .h2osm-blog-grid,
-          .h2osm-managed-page .h2osm-site > .h2osm-blog-list,
-          .h2osm-managed-page .h2osm-site > .h2osm-value-grid,
-          .h2osm-managed-page .h2osm-site > .h2osm-service-detail-grid,
-          .h2osm-managed-page .h2osm-site > .h2osm-project-categories,
-          .h2osm-managed-page .h2osm-site > .h2osm-before-after,
-          .h2osm-managed-page .h2osm-site > .h2osm-page-title,
-          .h2osm-managed-page .h2osm-site > .h2osm-contact-hero,
-          .h2osm-managed-page .h2osm-site > .h2osm-contact-grid {
-            width:100%!important;
-            max-width:none!important;
-            margin-left:0!important;
-            margin-right:0!important;
-            padding-left:0!important;
-            padding-right:0!important;
-          }
+          python3 - "$ROOT" "$BASE_VERSION" "$VERSION" <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+          base = sys.argv[2]
+          version = sys.argv[3]
 
-          .h2osm-managed-page .h2osm-site > .h2osm-section > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-service-grid > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-project-grid > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-salient-blog-row > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-blog-grid > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-blog-list > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-value-grid > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-service-detail-grid > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-project-categories > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-before-after > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-page-title > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-contact-hero > .row_col_wrap_12,
-          .h2osm-managed-page .h2osm-site > .h2osm-contact-grid > .row_col_wrap_12 {
-            width:calc(100% - 180px)!important;
-            max-width:1245px!important;
-            margin-left:auto!important;
-            margin-right:auto!important;
-            padding-left:0!important;
-            padding-right:0!important;
-          }
+          # 1) Stop replacing Salient's page template.
+          plugin = root / "includes/class-plugin.php"
+          s = plugin.read_text()
+          s = re.sub(r"\n\s*add_filter\(\s*'template_include'.*?\);", "", s, count=1)
+          plugin.write_text(s)
 
-          @media (max-width:999px) {
-            .h2osm-managed-page .h2osm-site > .h2osm-section > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-service-grid > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-project-grid > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-salient-blog-row > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-blog-grid > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-blog-list > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-value-grid > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-service-detail-grid > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-project-categories > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-before-after > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-page-title > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-contact-hero > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-contact-grid > .row_col_wrap_12 {
-              width:calc(100% - 48px)!important;
-              max-width:none!important;
-            }
-          }
+          # 2) Body content only: header/navigation/footer belong to Salient global architecture.
+          profile = root / "profiles/templa-design.php"
+          p = profile.read_text()
 
-          @media (max-width:690px) {
-            .h2osm-managed-page .h2osm-site > .h2osm-section > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-service-grid > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-project-grid > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-salient-blog-row > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-blog-grid > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-blog-list > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-value-grid > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-service-detail-grid > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-project-categories > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-before-after > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-page-title > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-contact-hero > .row_col_wrap_12,
-            .h2osm-managed-page .h2osm-site > .h2osm-contact-grid > .row_col_wrap_12 {
-              width:calc(100% - 36px)!important;
-            }
-          }
-          CSS
+          p = re.sub(
+              r"\$nav\s*=\s*static function \(\) use \( \$logo \): string \{.*?\n\};",
+              "\$nav = static function (): string { return ''; };",
+              p, count=1, flags=re.S
+          )
+          p = re.sub(
+              r"\$footer\s*=\s*static function \(\): string \{.*?\n\};",
+              "\$footer = static function (): string { return ''; };",
+              p, count=1, flags=re.S
+          )
 
-          sed -i "s/Version: $BASE_VERSION/Version: $VERSION/" "$ROOT/h2o-ia-site-migrator.php"
-          sed -i "s/define( 'H2OSM_VERSION', '$BASE_VERSION' )/define( 'H2OSM_VERSION', '$VERSION' )/" "$ROOT/h2o-ia-site-migrator.php"
-          sed -i "s/h2o-site-migrator:templa-design:$BASE_VERSION/h2o-site-migrator:templa-design:$VERSION/g" "$ROOT/profiles/templa-design.php"
-          sed -i "s/data-h2osm-release=\"$BASE_VERSION\"/data-h2osm-release=\"$VERSION\"/g" "$ROOT/profiles/templa-design.php"
+          # Version/sync markers.
+          p = p.replace(f"h2o-site-migrator:templa-design:{base}", f"h2o-site-migrator:templa-design:{version}")
+          p = p.replace(f'data-h2osm-release="{base}"', f'data-h2osm-release="{version}"')
+          profile.write_text(p)
+
+          # Main plugin version.
+          main = root / "h2o-ia-site-migrator.php"
+          m = main.read_text()
+          m = m.replace(f"Version: {base}", f"Version: {version}")
+          m = m.replace(f"define( 'H2OSM_VERSION', '{base}' )", f"define( 'H2OSM_VERSION', '{version}' )")
+          main.write_text(m)
+          PY
 
           {
             echo "## $VERSION — 2026-10-05"
-            echo "- Corrige Full Width Background: fondo de borde a borde con contenido dentro del container editorial."
-            echo "- Mantiene Full Width Content del hero/visuales sin cambios."
-            echo "- Conserva Nectar Post Grid del Blog."
+            echo "- Devuelve el render completo al template nativo de Salient."
+            echo "- Elimina header/logo/menu embebidos dentro del contenido de cada página."
+            echo "- Elimina footer embebido; el footer vuelve a depender de la configuración global/Global Section de Salient."
+            echo "- El Site Migrator administra únicamente el cuerpo de cada página."
+            echo "- Restaura la geometría CSS previa y deja Header, Footer y containers a cargo de Salient."
             echo
             cat "$ROOT/CHANGELOG.md"
           } > "$WORK/CHANGELOG.md"
           mv "$WORK/CHANGELOG.md" "$ROOT/CHANGELOG.md"
 
+          # Structural guard rails.
           php -l "$ROOT/h2o-ia-site-migrator.php" >/dev/null
+          php -l "$ROOT/includes/class-plugin.php" >/dev/null
           php -l "$ROOT/profiles/templa-design.php" >/dev/null
           grep -q "Version: $VERSION" "$ROOT/h2o-ia-site-migrator.php"
+          ! grep -q "add_filter( 'template_include'" "$ROOT/includes/class-plugin.php"
+          grep -q "\$nav = static function (): string { return ''; };" "$ROOT/profiles/templa-design.php"
+          grep -q "\$footer = static function (): string { return ''; };" "$ROOT/profiles/templa-design.php"
           grep -q 'type="full_width_content" full_width="stretch_row_content_no_spaces"' "$ROOT/profiles/templa-design.php"
           grep -q 'type="full_width_background" el_class="h2osm-section"' "$ROOT/profiles/templa-design.php"
           grep -q 'nectar_post_grid' "$ROOT/profiles/templa-design.php"
-          grep -q 'width:calc(100% - 180px)!important' "$ROOT/assets/frontend.css"
           ! grep -q 'margin-left:calc(50% - 50vw)' "$ROOT/assets/frontend.css"
 
           (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
@@ -197,7 +159,7 @@ jobs:
             gh release create "$TAG" "$PACKAGE" dist/release.json \
               --target main \
               --title "h2o IA Site Migrator $VERSION" \
-              --notes "Corrige Full Width Background: fondo edge-to-edge y contenido dentro del container editorial. Hero Full Width Content permanece intacto. Conserva Nectar Post Grid."
+              --notes "Corrección estructural: Site Migrator entrega sólo el body. Salient recupera su template nativo, Header Navigator y Footer/Global Section. Se eliminan logo, menú y footer duplicados dentro de las páginas."
           fi
 
       - name: Publish updater chunks and manifest
