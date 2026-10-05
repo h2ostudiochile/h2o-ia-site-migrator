@@ -257,6 +257,65 @@ jobs:
           p = p.replace(f'h2o-site-migrator:templa-design:{base}', f'h2o-site-migrator:templa-design:{version}')
           p = p.replace(f'data-h2osm-release="{base}"', f'data-h2osm-release="{version}"')
           p = re.sub(r"'version'\s*=>\s*'[^']+'", f"'version' => '{version}'", p, count=1)
+          # Convert remaining legacy HTML presentation wrappers into native
+          # Salient/WPBakery rows. This is semantic mapping, never CSS repair.
+          def native_hero(match):
+              image = match.group('image')
+              body = match.group('body').strip()
+              return (
+                  '[vc_row type="full_width_content" bg_image="' + image +
+                  '" bg_position="center center" bg_repeat="no-repeat" scene_position="center" '
+                  'text_color="light" text_align="left" top_padding="14%" bottom_padding="14%" '
+                  'overlay_strength="0.35"][vc_column column_padding="padding-8-percent" '
+                  'column_padding_position="left-right" width="1/1"][vc_column_text]' + body +
+                  '[/vc_column_text][/vc_column][/vc_row]'
+              )
+
+          hero_pattern = re.compile(
+              r'\\[vc_row[^\\]]*\\]\\s*'
+              r'\\[vc_column(?!_text)[^\\]]*\\]\\s*'
+              r'\\[vc_column_text[^\\]]*\\]\\s*'
+              r'<section class="h2osm-hero" style="--h2osm-bg:url\\([\\\'"](?P<image>.*?)[\\\'"]\\)">\\s*'
+              r'<div class="h2osm-hero-overlay"></div>\\s*'
+              r'<div class="h2osm-hero-copy">(?P<body>.*?)</div>\\s*'
+              r'</section>\\s*'
+              r'\\[/vc_column_text\\]\\s*\\[/vc_column\\]\\s*\\[/vc_row\\]',
+              re.S
+          )
+          p, hero_count = hero_pattern.subn(native_hero, p)
+
+          def native_subhero(match):
+              image = match.group('image')
+              body = match.group('body').strip()
+              return (
+                  '[vc_row type="full_width_content" bg_image="' + image +
+                  '" bg_position="center center" bg_repeat="no-repeat" scene_position="center" '
+                  'text_color="light" text_align="left" top_padding="10%" bottom_padding="10%" '
+                  'overlay_strength="0.35"][vc_column column_padding="padding-8-percent" '
+                  'column_padding_position="left-right" width="1/1"][vc_column_text]' + body +
+                  '[/vc_column_text][/vc_column][/vc_row]'
+              )
+
+          subhero_pattern = re.compile(
+              r'\\[vc_row[^\\]]*\\]\\s*'
+              r'\\[vc_column(?!_text)[^\\]]*\\]\\s*'
+              r'\\[vc_column_text[^\\]]*\\]\\s*'
+              r'<section class="h2osm-subhero" style="--h2osm-bg:url\\([\\\'"](?P<image>.*?)[\\\'"]\\)">\\s*'
+              r'<div class="h2osm-hero-overlay"></div>\\s*'
+              r'<div(?: class="h2osm-hero-copy")?>(?P<body>.*?)</div>\\s*'
+              r'</section>\\s*'
+              r'\\[/vc_column_text\\]\\s*\\[/vc_column\\]\\s*\\[/vc_row\\]',
+              re.S
+          )
+          p, subhero_count = subhero_pattern.subn(native_subhero, p)
+
+          if 'h2osm-hero' in p or 'h2osm-subhero' in p:
+              positions = [x for x in (p.find('h2osm-hero'), p.find('h2osm-subhero')) if x >= 0]
+              pos = min(positions)
+              snippet = p[max(0,pos-500):pos+1200].replace('\\n',' ')
+              raise SystemExit(f'LEGACY_HERO_WRAPPER_REMAINS hero={hero_count} subhero={subhero_count}: {snippet}')
+
+          print(f'NATIVE_HERO_CONVERSION hero={hero_count} subhero={subhero_count}')
           profile.write_text(p)
 
           # These files embodied the old rendering layer. 1.0.14 has no renderer
