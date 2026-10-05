@@ -29,8 +29,8 @@ jobs:
           set -Euo pipefail
           trap 'rc=$?; printf "FAILED line %s: %s\n" "$LINENO" "$BASH_COMMAND" > "$GITHUB_WORKSPACE/build-failure.txt"; exit "$rc"' ERR
 
-          BASE_VERSION="1.0.12"
-          VERSION="1.0.11"
+          BASE_VERSION="1.0.11"
+          VERSION="1.0.12"
           WORK="$RUNNER_TEMP/h2osm-$VERSION"
           DIST="$GITHUB_WORKSPACE/dist"
 
