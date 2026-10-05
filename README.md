@@ -16,8 +16,8 @@ La primera migración soportada es **Templa Design: Divi → Salient**.
 
 ## Actualizaciones
 
-Desde 1.0.3 el plugin usa **GitHub Releases** como canal de actualización. WordPress consulta el release más reciente, descarga `release.json`, valida versión, URL y SHA-256 y verifica el paquete antes de instalarlo.
+Desde 1.0.3 el plugin usa un **canal de actualización propio alojado en GitHub**. WordPress consulta `bootstrap/release.json`, valida versión, origen y SHA-256, reconstruye el paquete publicado desde fragmentos versionados y verifica el ZIP antes de instalarlo.
 
 La arquitectura de actualización es propia del componente. No depende de WPVibe, Creative Content, Essentials ni de otro plugin H2O.
 
-> Para que WordPress pueda consultar GitHub Releases sin credenciales, el repositorio de distribución debe ser públicamente legible. El código no contiene credenciales ni secretos.
+> El repositorio de distribución es públicamente legible. El código no contiene credenciales ni secretos.
