@@ -23,23 +23,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Rebuild package
+      - name: Rebuild and verify package
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
+          mkdir -p dist work
           cat bootstrap/part-*.b64 | tr -d '\n\r ' | base64 --decode > dist/package.zip
           EXPECTED="$(tr -d '\n\r ' < bootstrap/package.sha256)"
           ACTUAL="$(sha256sum dist/package.zip | awk '{print $1}')"
           test "$ACTUAL" = "$EXPECTED"
           unzip -t dist/package.zip >/dev/null
+          unzip -q dist/package.zip -d work
 
-          VERSION="$(unzip -p dist/package.zip h2o-ia-site-migrator/h2o-ia-site-migrator.php | sed -n 's/^[[:space:]]*\*[[:space:]]*Version:[[:space:]]*//p' | head -n1 | tr -d '\r')"
+          VERSION="$(sed -n 's/^[[:space:]]*\*[[:space:]]*Version:[[:space:]]*//p' work/h2o-ia-site-migrator/h2o-ia-site-migrator.php | head -n1 | tr -d '\r')"
           test -n "$VERSION"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "PACKAGE_SHA256=$ACTUAL" >> "$GITHUB_ENV"
 
-          unzip -p dist/package.zip h2o-ia-site-migrator/h2o-ia-site-migrator.php | grep -q "Update URI: https://github.com/h2ostudiochile/h2o-ia-site-migrator"
-          unzip -p dist/package.zip h2o-ia-site-migrator/includes/class-updater.php | grep -q "update_plugins_github.com"
+          grep -q "Update URI: https://github.com/h2ostudiochile/h2o-ia-site-migrator" work/h2o-ia-site-migrator/h2o-ia-site-migrator.php
+          grep -q "update_plugins_github.com" work/h2o-ia-site-migrator/includes/class-updater.php
+          grep -q "h2o-site-migrator:templa-design:$VERSION" work/h2o-ia-site-migrator/profiles/templa-design.php
 
           mv dist/package.zip "dist/h2o-ia-site-migrator-$VERSION.zip"
 
@@ -56,6 +59,25 @@ jobs:
             },null,2)+"\n");
           ' "$VERSION" "$PACKAGE_URL" "$ACTUAL"
 
+      - name: Materialize plugin source in repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --delete \
+            --exclude='.github' \
+            --exclude='bootstrap' \
+            --exclude='dist' \
+            --exclude='.git' \
+            work/h2o-ia-site-migrator/ ./
+
+          git config user.name "h2o-release-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add h2o-ia-site-migrator.php includes assets profiles templates uninstall.php README.md CHANGELOG.md
+          if ! git diff --cached --quiet; then
+            git commit -m "Site Migrator $VERSION: materialize verified source"
+            git push origin HEAD:main
+          fi
+
       - name: Publish GitHub Release
         shell: bash
         env:
@@ -70,7 +92,7 @@ jobs:
             gh release upload "$TAG" "$PACKAGE" "$MANIFEST" --clobber
           else
             gh release create "$TAG" "$PACKAGE" "$MANIFEST" \
-              --target "$GITHUB_SHA" \
+              --target main \
               --title "h2o IA Site Migrator $VERSION" \
-              --notes "Canal de actualización nativo por GitHub Releases con verificación SHA-256. Templa mantiene / intacto y /inicio/ como entorno de prueba."
+              --notes "Canal de actualización nativo con verificación SHA-256. Templa conserva / intacto y usa /inicio/ como entorno de prueba."
           fi
