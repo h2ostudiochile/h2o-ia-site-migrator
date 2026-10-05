@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - fix/salient-native-1.0.15
+      - fix/templa-visual-1.0.15
     paths:
       - '.github/workflows/release-1.0.15.yml'
       - 'bootstrap/trigger-1.0.15.txt'
