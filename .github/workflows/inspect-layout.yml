@@ -1,4 +1,4 @@
-name: Inspect current Salient integration
+name: Inspect 1.0.8 funnel insertion points
 
 on:
   push:
@@ -14,33 +14,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect 1.0.7 theme integration and page markup
+      - name: Inspect profile
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf /tmp/h2osm107
-          mkdir -p /tmp/h2osm107
-          cat bootstrap/1.0.7/part-*.b64 | tr -d '\n\r ' | base64 --decode > /tmp/h2osm107.zip
-          unzip -q /tmp/h2osm107.zip -d /tmp/h2osm107
-          ROOT="/tmp/h2osm107/h2o-ia-site-migrator"
-
-          echo '=== PLUGIN TEMPLATE HOOKS ==='
-          grep -nE 'template_include|managed-page|wp_head|wp_footer|get_header|get_footer|enqueue_assets|template\(' "$ROOT/includes/class-plugin.php" "$ROOT/templates/managed-page.php" || true
-
-          echo '=== PROFILE HEADER / NAV / FOOTER / GLOBAL ==='
-          grep -nEi 'header|nav|menu|logo|footer|global|h2osm-nav|h2osm-footer|TEMPLA_BLACK|Hablemos' "$ROOT/profiles/templa-design.php" | head -n 260 || true
-
-          echo '=== ALL ROWS ==='
-          grep -n '\[vc_row' "$ROOT/profiles/templa-design.php" || true
-
-          echo '=== POSSIBLE EMPTY ROWS ==='
-          python3 - <<'PY'
-          import re, pathlib
-          p=pathlib.Path("/tmp/h2osm107/h2o-ia-site-migrator/profiles/templa-design.php")
-          s=p.read_text()
-          for m in re.finditer(r'\[vc_row[^\]]*\](.*?)\[/vc_row\]', s, re.S):
-              inner=m.group(1)
-              cleaned=re.sub(r'\[/?vc_column[^\]]*\]|\[vc_column_text[^\]]*\]|\[/vc_column_text\]|<!--.*?-->','',inner,flags=re.S).strip()
-              if not re.sub(r'\s+','',cleaned):
-                  print(m.group(0)[:500].replace("\n"," "))
-          PY
+          rm -rf /tmp/h2osm108
+          mkdir -p /tmp/h2osm108
+          cat bootstrap/1.0.8/part-*.b64 | tr -d '\n\r ' | base64 --decode > /tmp/h2osm108.zip
+          unzip -q /tmp/h2osm108.zip -d /tmp/h2osm108
+          ROOT="/tmp/h2osm108/h2o-ia-site-migrator"
+          echo '=== PROFILE HEAD ==='
+          sed -n '1,180p' "$ROOT/profiles/templa-design.php"
+          echo '=== PROFILE MID ==='
+          sed -n '180,380p' "$ROOT/profiles/templa-design.php"
+          echo '=== PLUGIN ==='
+          sed -n '1,220p' "$ROOT/includes/class-plugin.php"
