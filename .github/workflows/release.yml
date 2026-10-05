@@ -23,28 +23,286 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build 1.0.8 native Salient structure fix
+      - name: Build 1.0.9 contextual Funnel integration
         shell: bash
         run: |
           set -euo pipefail
 
-          BASE_VERSION="1.0.7"
-          VERSION="1.0.8"
+          BASE_VERSION="1.0.8"
+          VERSION="1.0.9"
           WORK="$RUNNER_TEMP/h2osm-$VERSION"
           DIST="$GITHUB_WORKSPACE/dist"
 
           rm -rf "$WORK" "$DIST"
-          mkdir -p "$WORK/current" "$WORK/good" "$DIST/parts"
+          mkdir -p "$WORK/current" "$DIST/parts"
 
-          # Current plugin.
           cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
           unzip -q "$WORK/current.zip" -d "$WORK/current"
           ROOT="$WORK/current/h2o-ia-site-migrator"
 
-          # Restore pre-1.0.7 CSS baseline. Native Salient will own row/container geometry.
-          cat bootstrap/1.0.6/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/good.zip"
-          unzip -q "$WORK/good.zip" -d "$WORK/good"
-          cp "$WORK/good/h2o-ia-site-migrator/assets/frontend.css" "$ROOT/assets/frontend.css"
+          cat > "$ROOT/includes/class-funnels.php" <<'PHP'
+          <?php
+          namespace H2O\Site_Migrator;
+
+          if ( ! defined( 'ABSPATH' ) ) {
+              exit;
+          }
+
+          /**
+           * Public-HTTP-only Funnel consumer.
+           *
+           * This component never reads Funnel tables, options, classes, functions,
+           * postmeta or local IDs. Discovery and rendering are obtained exclusively
+           * from h2o.funnels.resources/v1 over HTTP using funnel_uuid.
+           */
+          final class Funnels {
+              private const CONTRACT = 'h2o.funnels.resources/v1';
+              private const NAMESPACE = 'h2o-funnels-mktdigital/resources/v1';
+              private const CATALOG_CACHE = 'h2osm_funnels_catalog_v1';
+              private static array $printed_assets = array();
+
+              public static function register(): void {
+                  add_shortcode( 'h2osm_funnel', array( self::class, 'shortcode' ) );
+              }
+
+              public static function shortcode( array|string $atts = array() ): string {
+                  $atts = shortcode_atts(
+                      array( 'context' => '' ),
+                      is_array( $atts ) ? $atts : array(),
+                      'h2osm_funnel'
+                  );
+                  $context = sanitize_key( (string) $atts['context'] );
+                  if ( ! in_array( $context, array( 'corporate', 'residential', 'contact' ), true ) ) {
+                      return '';
+                  }
+
+                  $catalog = self::catalog();
+                  if ( is_wp_error( $catalog ) ) {
+                      return self::admin_note( 'No fue posible consultar el catálogo público de Funnels.' );
+                  }
+
+                  $resource = self::resolve_context( $context, (array) ( $catalog['funnels'] ?? array() ) );
+                  if ( ! is_array( $resource ) ) {
+                      return self::admin_note( 'No existe un Funnel activo inequívoco para el contexto ' . $context . '.' );
+                  }
+
+                  $uuid = strtolower( sanitize_text_field( (string) ( $resource['funnel_uuid'] ?? '' ) ) );
+                  if ( ! self::valid_uuid( $uuid ) ) {
+                      return self::admin_note( 'El Funnel resuelto no expone un funnel_uuid válido.' );
+                  }
+
+                  $payload = self::get_json( rest_url( self::NAMESPACE . '/funnels/' . rawurlencode( $uuid ) . '/embed' ) );
+                  if ( is_wp_error( $payload ) ) {
+                      return self::admin_note( 'No fue posible obtener el embed público del Funnel.' );
+                  }
+                  if (
+                      true !== ( $payload['ok'] ?? false ) ||
+                      self::CONTRACT !== (string) ( $payload['contract'] ?? '' ) ||
+                      $uuid !== strtolower( (string) ( $payload['funnel_uuid'] ?? '' ) ) ||
+                      ! is_array( $payload['embed'] ?? null )
+                  ) {
+                      return self::admin_note( 'Funnels devolvió un payload que no cumple el contrato público esperado.' );
+                  }
+
+                  $embed = $payload['embed'];
+                  $html = (string) ( $embed['html'] ?? '' );
+                  if ( '' === trim( $html ) ) {
+                      return self::admin_note( 'El Funnel público no entregó contenido renderizable.' );
+                  }
+
+                  $assets = self::asset_tags( (array) ( $embed['styles'] ?? array() ), 'style' );
+                  $assets .= self::asset_tags( (array) ( $embed['scripts'] ?? array() ), 'script' );
+
+                  return $assets
+                      . '<div class="h2osm-funnel-remote" data-h2osm-funnel-context="' . esc_attr( $context ) . '" data-h2osm-funnel-uuid="' . esc_attr( $uuid ) . '">'
+                      . $html
+                      . '</div>';
+              }
+
+              private static function catalog(): array|\WP_Error {
+                  $cached = get_transient( self::CATALOG_CACHE );
+                  if ( is_array( $cached ) && self::CONTRACT === (string) ( $cached['contract'] ?? '' ) ) {
+                      return $cached;
+                  }
+
+                  $payload = self::get_json(
+                      add_query_arg(
+                          'status',
+                          'active',
+                          rest_url( self::NAMESPACE . '/funnels' )
+                      )
+                  );
+                  if ( is_wp_error( $payload ) ) {
+                      return $payload;
+                  }
+                  if (
+                      true !== ( $payload['ok'] ?? false ) ||
+                      self::CONTRACT !== (string) ( $payload['contract'] ?? '' ) ||
+                      ! is_array( $payload['funnels'] ?? null )
+                  ) {
+                      return new \WP_Error( 'h2osm_funnel_contract_invalid', 'Contrato público de Funnels inválido.' );
+                  }
+
+                  set_transient( self::CATALOG_CACHE, $payload, 2 * MINUTE_IN_SECONDS );
+                  return $payload;
+              }
+
+              private static function get_json( string $url ): array|\WP_Error {
+                  $home_host = strtolower( (string) wp_parse_url( home_url( '/' ), PHP_URL_HOST ) );
+                  $url_host = strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) );
+                  if ( '' === $home_host || $home_host !== $url_host ) {
+                      return new \WP_Error( 'h2osm_funnel_origin_rejected', 'Origen HTTP no permitido.' );
+                  }
+
+                  $response = wp_safe_remote_get(
+                      $url,
+                      array(
+                          'timeout' => 8,
+                          'redirection' => 0,
+                          'headers' => array(
+                              'Accept' => 'application/json',
+                              'X-H2O-Contract' => self::CONTRACT,
+                              'X-H2O-Consumer' => 'h2o-ia-site-migrator',
+                          ),
+                      )
+                  );
+                  if ( is_wp_error( $response ) ) {
+                      return $response;
+                  }
+                  if ( 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+                      return new \WP_Error( 'h2osm_funnel_http_error', 'Funnels no respondió 200.' );
+                  }
+                  $payload = json_decode( wp_remote_retrieve_body( $response ), true );
+                  return is_array( $payload )
+                      ? $payload
+                      : new \WP_Error( 'h2osm_funnel_json_invalid', 'Respuesta JSON inválida.' );
+              }
+
+              private static function resolve_context( string $context, array $funnels ): ?array {
+                  $best = null;
+                  $best_score = 0;
+                  $ambiguous = false;
+
+                  foreach ( $funnels as $funnel ) {
+                      if ( ! is_array( $funnel ) || 'active' !== (string) ( $funnel['status'] ?? '' ) ) {
+                          continue;
+                      }
+                      $score = self::score( $context, $funnel );
+                      if ( $score <= 0 ) {
+                          continue;
+                      }
+                      if ( $score > $best_score ) {
+                          $best = $funnel;
+                          $best_score = $score;
+                          $ambiguous = false;
+                          continue;
+                      }
+                      if ( $score === $best_score && $best_score > 0 ) {
+                          $current_uuid = strtolower( (string) ( $funnel['funnel_uuid'] ?? '' ) );
+                          $best_uuid = strtolower( (string) ( $best['funnel_uuid'] ?? '' ) );
+                          if ( $current_uuid !== $best_uuid ) {
+                              $ambiguous = true;
+                          }
+                      }
+                  }
+
+                  return $ambiguous ? null : $best;
+              }
+
+              private static function score( string $context, array $funnel ): int {
+                  $key = self::normal( (string) ( $funnel['public_key'] ?? '' ) );
+                  $category = self::normal( (string) ( $funnel['category'] ?? '' ) );
+                  $name = self::normal( (string) ( $funnel['name'] ?? '' ) );
+
+                  if ( 'contact' === $context ) {
+                      if ( 'formulario contacto' === $key ) {
+                          return 1000;
+                      }
+                      return self::keyword_score( array( 'contacto', 'contact' ), $key, $category, $name );
+                  }
+
+                  if ( 'residential' === $context ) {
+                      return self::keyword_score(
+                          array( 'residencial', 'residential', 'vivienda', 'hogar', 'casa', 'departamento' ),
+                          $key,
+                          $category,
+                          $name
+                      );
+                  }
+
+                  return self::keyword_score(
+                      array( 'corporativo', 'corporate', 'empresa', 'oficina', 'trabajo', 'comercial', 'business', 'b2b' ),
+                      $key,
+                      $category,
+                      $name
+                  );
+              }
+
+              private static function keyword_score( array $keywords, string $key, string $category, string $name ): int {
+                  $score = 0;
+                  foreach ( $keywords as $keyword ) {
+                      $needle = self::normal( (string) $keyword );
+                      if ( '' === $needle ) {
+                          continue;
+                      }
+                      if ( $key === $needle ) {
+                          $score = max( $score, 900 );
+                      } elseif ( '' !== $key && str_contains( $key, $needle ) ) {
+                          $score = max( $score, 700 );
+                      }
+                      if ( $category === $needle ) {
+                          $score = max( $score, 850 );
+                      } elseif ( '' !== $category && str_contains( $category, $needle ) ) {
+                          $score = max( $score, 650 );
+                      }
+                      if ( $name === $needle ) {
+                          $score = max( $score, 800 );
+                      } elseif ( '' !== $name && str_contains( $name, $needle ) ) {
+                          $score = max( $score, 500 );
+                      }
+                  }
+                  return $score;
+              }
+
+              private static function normal( string $value ): string {
+                  $value = remove_accents( strtolower( trim( $value ) ) );
+                  $value = preg_replace( '/[^a-z0-9]+/', ' ', $value );
+                  return trim( (string) $value );
+              }
+
+              private static function valid_uuid( string $uuid ): bool {
+                  return 1 === preg_match( '/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', $uuid );
+              }
+
+              private static function asset_tags( array $urls, string $kind ): string {
+                  $out = '';
+                  $home_host = strtolower( (string) wp_parse_url( home_url( '/' ), PHP_URL_HOST ) );
+                  foreach ( $urls as $raw ) {
+                      $url = esc_url_raw( (string) $raw, array( 'https', 'http' ) );
+                      if ( '' === $url || strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) ) !== $home_host ) {
+                          continue;
+                      }
+                      $fingerprint = $kind . '|' . $url;
+                      if ( isset( self::$printed_assets[ $fingerprint ] ) ) {
+                          continue;
+                      }
+                      self::$printed_assets[ $fingerprint ] = true;
+                      if ( 'style' === $kind ) {
+                          $out .= '<link rel="stylesheet" href="' . esc_url( $url ) . '">';
+                      } else {
+                          $out .= '<script src="' . esc_url( $url ) . '"></script>';
+                      }
+                  }
+                  return $out;
+              }
+
+              private static function admin_note( string $message ): string {
+                  return current_user_can( 'manage_options' )
+                      ? '<p class="h2osm-funnel-note">' . esc_html( $message ) . '</p>'
+                      : '';
+              }
+          }
+          PHP
 
           python3 - "$ROOT" "$BASE_VERSION" "$VERSION" <<'PY'
           import pathlib, re, sys
@@ -52,70 +310,98 @@ jobs:
           base = sys.argv[2]
           version = sys.argv[3]
 
-          # 1) Stop replacing Salient's page template.
-          plugin = root / "includes/class-plugin.php"
-          s = plugin.read_text()
-          s = re.sub(r"\n\s*add_filter\(\s*'template_include'.*?\);", "", s, count=1)
-          plugin.write_text(s)
-
-          # 2) Body content only: header/navigation/footer belong to Salient global architecture.
-          profile = root / "profiles/templa-design.php"
-          p = profile.read_text()
-
-          p = re.sub(
-              r"\$nav\s*=\s*static function \(\) use \( \$logo \): string \{.*?\n\};",
-              lambda _m: "$nav = static function (): string { return ''; };",
-              p, count=1, flags=re.S
-          )
-          p = re.sub(
-              r"\$footer\s*=\s*static function \(\): string \{.*?\n\};",
-              lambda _m: "$footer = static function (): string { return ''; };",
-              p, count=1, flags=re.S
-          )
-
-          # Version/sync markers.
-          p = p.replace(f"h2o-site-migrator:templa-design:{base}", f"h2o-site-migrator:templa-design:{version}")
-          p = p.replace(f'data-h2osm-release="{base}"', f'data-h2osm-release="{version}"')
-          profile.write_text(p)
-
-          # Main plugin version.
           main = root / "h2o-ia-site-migrator.php"
           m = main.read_text()
           m = m.replace(f"Version: {base}", f"Version: {version}")
           m = m.replace(f"define( 'H2OSM_VERSION', '{base}' )", f"define( 'H2OSM_VERSION', '{version}' )")
+          needle = "require_once H2OSM_DIR . 'includes/class-plugin.php';"
+          if "includes/class-funnels.php" not in m:
+              m = m.replace(needle, "require_once H2OSM_DIR . 'includes/class-funnels.php';\n" + needle)
           main.write_text(m)
+
+          plugin = root / "includes/class-plugin.php"
+          s = plugin.read_text()
+          if "Funnels::register();" not in s:
+              s = s.replace("        Updater::boot();", "        Updater::boot();\n        Funnels::register();")
+          plugin.write_text(s)
+
+          profile = root / "profiles/templa-design.php"
+          p = profile.read_text()
+          p = p.replace(f"h2o-site-migrator:templa-design:{base}", f"h2o-site-migrator:templa-design:{version}")
+          p = p.replace(f'data-h2osm-release="{base}"', f'data-h2osm-release="{version}"')
+          p = re.sub(r"'version'\s*=>\s*'[^']+'", f"'version' => '{version}'", p, count=1)
+
+          service_anchor = '[vc_row type="full_width_background" full_width="stretch_row" el_class="h2osm-section h2osm-section-dark"]'
+          if '[h2osm_funnel context="corporate"]' not in p:
+              service_blocks = '''[vc_row type="full_width_background" el_class="h2osm-section h2osm-funnel-section h2osm-funnel-corporate"][vc_column][vc_column_text]<p class="h2osm-eyebrow h2osm-dark">Empresas y espacios comerciales</p><h2>Agenda una reunión para evaluar tu proyecto.</h2><p class="h2osm-body-lg h2osm-max">Para oficinas, espacios de trabajo, habilitaciones y proyectos comerciales.</p>[/vc_column_text][h2osm_funnel context="corporate"][/vc_column][/vc_row]
+          [vc_row type="full_width_background" el_class="h2osm-section h2osm-funnel-section h2osm-funnel-residential"][vc_column][vc_column_text]<p class="h2osm-eyebrow h2osm-dark">Proyectos residenciales</p><h2>Cuéntanos qué espacio quieres transformar.</h2><p class="h2osm-body-lg h2osm-max">Para casas, departamentos, terrazas, quinchos y remodelaciones residenciales.</p>[/vc_column_text][h2osm_funnel context="residential"][/vc_column][/vc_row]
+          '''
+              pos = p.find(service_anchor, p.find('$servicios ='))
+              if pos == -1:
+                  raise SystemExit('services funnel insertion anchor not found')
+              p = p[:pos] + service_blocks + p[pos:]
+
+          contact_anchor = '[vc_row type="full_width_background" full_width="stretch_row" el_class="h2osm-section h2osm-section-cream"]'
+          if '[h2osm_funnel context="contact"]' not in p:
+              contact_block = '''[vc_row type="full_width_background" el_class="h2osm-section h2osm-funnel-section h2osm-contact-funnel"][vc_column][vc_column_text]<p class="h2osm-eyebrow h2osm-dark">Cuéntanos sobre tu proyecto</p><h2>Agenda una reunión para evaluar tu proyecto.</h2>[/vc_column_text][h2osm_funnel context="contact"][/vc_column][/vc_row]
+          '''
+              start = p.find('$contacto =')
+              pos = p.find(contact_anchor, start)
+              if pos == -1:
+                  raise SystemExit('contact funnel insertion anchor not found')
+              p = p[:pos] + contact_block + p[pos:]
+
+          profile.write_text(p)
           PY
+
+          cat >> "$ROOT/assets/frontend.css" <<'CSS'
+
+          /* 1.0.9 — remote Funnel sections. Geometry stays native to Salient. */
+          .h2osm-funnel-section .h2osm-funnel-remote{
+            margin-top:34px;
+          }
+          .h2osm-funnel-section .h2ofm-funnel-shell{
+            width:100%;
+            max-width:100%;
+          }
+          .h2osm-funnel-note{
+            margin:24px 0 0;
+            padding:14px 16px;
+            border:1px solid rgba(46,43,36,.18);
+            border-radius:10px;
+            font-size:13px;
+          }
+          CSS
 
           {
             echo "## $VERSION — 2026-10-05"
-            echo "- Devuelve el render completo al template nativo de Salient."
-            echo "- Elimina header/logo/menu embebidos dentro del contenido de cada página."
-            echo "- Elimina footer embebido; el footer vuelve a depender de la configuración global/Global Section de Salient."
-            echo "- El Site Migrator administra únicamente el cuerpo de cada página."
-            echo "- Restaura la geometría CSS previa y deja Header, Footer y containers a cargo de Salient."
+            echo "- Integra Funnels por HTTP público h2o.funnels.resources/v1 y funnel_uuid; no usa internals ni shortcodes de IA Funnels."
+            echo "- Servicios resuelve dos recorridos previamente definidos: corporativo para trabajo/comercial y residencial para vivienda."
+            echo "- Contacto usa el formulario de contacto activo resuelto desde el catálogo público."
+            echo "- Los embeds se obtienen desde GET /funnels/{funnel_uuid}/embed de IA Funnels 2.8.2."
+            echo "- Salient conserva Header Navigator, Footer/Global Section y geometría de filas."
             echo
             cat "$ROOT/CHANGELOG.md"
           } > "$WORK/CHANGELOG.md"
           mv "$WORK/CHANGELOG.md" "$ROOT/CHANGELOG.md"
 
-          # Structural guard rails.
           php -l "$ROOT/h2o-ia-site-migrator.php" >/dev/null
           php -l "$ROOT/includes/class-plugin.php" >/dev/null
+          php -l "$ROOT/includes/class-funnels.php" >/dev/null
           php -l "$ROOT/profiles/templa-design.php" >/dev/null
           grep -q "Version: $VERSION" "$ROOT/h2o-ia-site-migrator.php"
-          ! grep -q "add_filter( 'template_include'" "$ROOT/includes/class-plugin.php"
-          grep -q "\$nav = static function (): string { return ''; };" "$ROOT/profiles/templa-design.php"
-          grep -q "\$footer = static function (): string { return ''; };" "$ROOT/profiles/templa-design.php"
-          grep -q 'type="full_width_content" full_width="stretch_row_content_no_spaces"' "$ROOT/profiles/templa-design.php"
-          grep -q 'type="full_width_background" el_class="h2osm-section"' "$ROOT/profiles/templa-design.php"
-          grep -q 'nectar_post_grid' "$ROOT/profiles/templa-design.php"
-          ! grep -q 'margin-left:calc(50% - 50vw)' "$ROOT/assets/frontend.css"
+          grep -q "Funnels::register();" "$ROOT/includes/class-plugin.php"
+          grep -q "h2o.funnels.resources/v1" "$ROOT/includes/class-funnels.php"
+          grep -q 'h2osm_funnel context="corporate"' "$ROOT/profiles/templa-design.php"
+          grep -q 'h2osm_funnel context="residential"' "$ROOT/profiles/templa-design.php"
+          grep -q 'h2osm_funnel context="contact"' "$ROOT/profiles/templa-design.php"
+          ! grep -q "H2OFM_" "$ROOT/includes/class-funnels.php"
+          ! grep -q "get_option.*h2ofm" "$ROOT/includes/class-funnels.php"
 
           (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
           SHA="$(sha256sum "$DIST/h2o-ia-site-migrator-$VERSION.zip" | awk '{print $1}')"
           echo "$SHA" > "$DIST/package.sha256"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "PACKAGE_SHA256=$SHA" >> "$GITHUB_ENV"
 
           base64 -w0 "$DIST/h2o-ia-site-migrator-$VERSION.zip" > "$DIST/package.b64"
           split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/raw-"
@@ -159,7 +445,7 @@ jobs:
             gh release create "$TAG" "$PACKAGE" dist/release.json \
               --target main \
               --title "h2o IA Site Migrator $VERSION" \
-              --notes "Corrección estructural: Site Migrator entrega sólo el body. Salient recupera su template nativo, Header Navigator y Footer/Global Section. Se eliminan logo, menú y footer duplicados dentro de las páginas."
+              --notes "Integración contextual de Funnels exclusivamente por HTTP público y funnel_uuid. Corporativo para trabajo/comercial, residencial para vivienda y contacto general en /contacto/. Requiere h2o Funnels MktDigital 2.8.2."
           fi
 
       - name: Publish updater chunks and manifest
