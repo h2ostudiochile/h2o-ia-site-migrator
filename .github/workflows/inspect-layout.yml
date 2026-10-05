@@ -1,4 +1,4 @@
-name: Inspect 1.0.12 runtime
+name: Inspect 1.0.12 rendered inputs
 
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect runtime
+      - name: Inspect CSS and service rows
         shell: bash
         run: |
           set -euo pipefail
@@ -23,11 +23,9 @@ jobs:
           cat bootstrap/1.0.12/part-*.b64 | tr -d '\n\r ' | base64 --decode > /tmp/h2osm112.zip
           unzip -q /tmp/h2osm112.zip -d /tmp/h2osm112
           ROOT="/tmp/h2osm112/h2o-ia-site-migrator"
-          echo '=== MAIN ==='
-          sed -n '1,180p' "$ROOT/h2o-ia-site-migrator.php"
-          echo '=== PLUGIN BOOT ==='
-          sed -n '1,260p' "$ROOT/includes/class-plugin.php"
-          echo '=== SYNC ==='
-          sed -n '1,360p' "$ROOT/includes/class-sync.php"
-          echo '=== SALIENT SETUP ==='
-          sed -n '1,320p' "$ROOT/includes/class-salient-setup.php"
+          echo '=== CSS ==='
+          cat "$ROOT/assets/frontend.css"
+          echo '=== SERVICE ROWS ==='
+          grep -n '\[vc_row' "$ROOT/profiles/templa-design.php" | head -n 80
+          echo '=== SERVICE SECTION ==='
+          grep -n -A45 -B8 '\$servicios' "$ROOT/profiles/templa-design.php" | head -n 120
