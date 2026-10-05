@@ -1,5 +1,5 @@
 name: Release h2o IA Site Migrator
-# bootstrap release 1.0.3 public
+# release channel
 
 on:
   push:
@@ -59,25 +59,6 @@ jobs:
               requires_php:"8.0"
             },null,2)+"\n");
           ' "$VERSION" "$PACKAGE_URL" "$ACTUAL"
-
-      - name: Materialize plugin source in repository
-        shell: bash
-        run: |
-          set -euo pipefail
-          rsync -a --delete \
-            --exclude='.github' \
-            --exclude='bootstrap' \
-            --exclude='dist' \
-            --exclude='.git' \
-            work/h2o-ia-site-migrator/ ./
-
-          git config user.name "h2o-release-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add h2o-ia-site-migrator.php includes assets profiles templates uninstall.php README.md CHANGELOG.md
-          if ! git diff --cached --quiet; then
-            git commit -m "Site Migrator $VERSION: materialize verified source"
-            git push origin HEAD:main
-          fi
 
       - name: Publish GitHub Release
         shell: bash
