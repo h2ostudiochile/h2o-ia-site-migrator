@@ -1,5 +1,5 @@
 name: Release h2o IA Site Migrator
-# bootstrap release 1.0.3
+# bootstrap release 1.0.3 public
 
 on:
   push:
