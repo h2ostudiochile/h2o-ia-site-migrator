@@ -23,13 +23,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build 1.0.10 clean native Salient rows
+      - name: Build 1.0.11 Salient-native cleanup
         shell: bash
         run: |
           set -euo pipefail
 
-          BASE_VERSION="1.0.9"
-          VERSION="1.0.10"
+          BASE_VERSION="1.0.10"
+          VERSION="1.0.11"
           WORK="$RUNNER_TEMP/h2osm-$VERSION"
           DIST="$GITHUB_WORKSPACE/dist"
 
@@ -48,48 +48,77 @@ jobs:
               exit;
           }
 
-          /**
-           * Uses only WordPress public navigation APIs.
-           * No Salient options, Redux values, files, postmeta or internals are read/written.
-           */
           final class Salient_Setup {
-              private const MENU_NAME = 'Templa Principal';
+              private const LOGO_URL = 'https://templadesign.cl/wp-content/uploads/2025/04/TEMPLA_BLACKsm.png';
 
               public static function register(): void {
-                  add_action( 'init', array( self::class, 'ensure_primary_menu' ), 50 );
+                  add_action( 'init', array( self::class, 'maybe_configure' ), 100 );
               }
 
-              public static function ensure_primary_menu(): void {
+              public static function maybe_configure(): void {
                   $profile = Registry::current_profile();
                   if ( ! is_array( $profile ) || 'templa-design' !== (string) ( $profile['key'] ?? '' ) ) {
                       return;
                   }
+                  self::configure();
+              }
 
+              public static function configure(): void {
+                  self::configure_header();
+                  self::configure_primary_menu();
+              }
+
+              private static function configure_header(): void {
+                  $options = get_option( 'salient_redux', array() );
+                  $options = is_array( $options ) ? $options : array();
+
+                  $options['use-logo']           = '1';
+                  $options['logo']               = self::LOGO_URL;
+                  $options['logo-height']        = '42';
+                  $options['mobile-logo-height'] = '30';
+                  $options['header-padding']     = '18';
+                  $options['header_format']      = 'default';
+                  $options['header-disable-search'] = '1';
+                  $options['transparent-header'] = '0';
+
+                  update_option( 'salient_redux', $options, false );
+              }
+
+              private static function configure_primary_menu(): void {
                   $registered = get_registered_nav_menus();
                   if ( ! isset( $registered['top_nav'] ) ) {
                       return;
                   }
 
-                  $menu = wp_get_nav_menu_object( self::MENU_NAME );
+                  $menu = false;
+                  foreach ( array( 'Principal', 'Main', 'Templa Principal', 'Top Navigation Menu' ) as $name ) {
+                      $candidate = wp_get_nav_menu_object( $name );
+                      if ( $candidate ) {
+                          $menu = $candidate;
+                          break;
+                      }
+                  }
+
                   if ( ! $menu ) {
-                      $menu_id = wp_create_nav_menu( self::MENU_NAME );
+                      $menu_id = wp_create_nav_menu( 'Principal' );
                       if ( is_wp_error( $menu_id ) ) {
                           return;
                       }
                       $menu = wp_get_nav_menu_object( (int) $menu_id );
                   }
+
                   if ( ! $menu ) {
                       return;
                   }
 
                   $menu_id = (int) $menu->term_id;
-                  $items = wp_get_nav_menu_items( $menu_id );
-                  $items = is_array( $items ) ? $items : array();
-                  $by_object = array();
+                  $existing = wp_get_nav_menu_items( $menu_id );
+                  $existing = is_array( $existing ) ? $existing : array();
+                  $by_page = array();
 
-                  foreach ( $items as $item ) {
-                      if ( isset( $item->object_id ) ) {
-                          $by_object[ (int) $item->object_id ] = (int) $item->ID;
+                  foreach ( $existing as $item ) {
+                      if ( 'page' === (string) ( $item->object ?? '' ) ) {
+                          $by_page[ (int) $item->object_id ] = (int) $item->ID;
                       }
                   }
 
@@ -110,10 +139,9 @@ jobs:
                           continue;
                       }
 
-                      $item_id = $by_object[ (int) $page->ID ] ?? 0;
                       wp_update_nav_menu_item(
                           $menu_id,
-                          $item_id,
+                          $by_page[ (int) $page->ID ] ?? 0,
                           array(
                               'menu-item-title'     => $entry['label'],
                               'menu-item-object-id' => (int) $page->ID,
@@ -128,90 +156,207 @@ jobs:
 
                   $locations = get_theme_mod( 'nav_menu_locations', array() );
                   $locations = is_array( $locations ) ? $locations : array();
-                  if ( (int) ( $locations['top_nav'] ?? 0 ) !== $menu_id ) {
-                      $locations['top_nav'] = $menu_id;
-                      set_theme_mod( 'nav_menu_locations', $locations );
-                  }
+                  $locations['top_nav'] = $menu_id;
+                  set_theme_mod( 'nav_menu_locations', $locations );
               }
           }
           PHP
 
           python3 - "$ROOT" "$BASE_VERSION" "$VERSION" <<'PY'
           import pathlib, re, sys
+
           root = pathlib.Path(sys.argv[1])
           base = sys.argv[2]
           version = sys.argv[3]
 
           main = root / "h2o-ia-site-migrator.php"
-          m = main.read_text()
-          m = m.replace(f"Version: {base}", f"Version: {version}")
-          m = m.replace(f"define( 'H2OSM_VERSION', '{base}' )", f"define( 'H2OSM_VERSION', '{version}' )")
-          needle = "require_once H2OSM_DIR . 'includes/class-plugin.php';"
-          if "includes/class-salient-setup.php" not in m:
-              m = m.replace(needle, "require_once H2OSM_DIR . 'includes/class-salient-setup.php';\n" + needle)
-          main.write_text(m)
+          s = main.read_text()
+          s = s.replace(f"Version: {base}", f"Version: {version}")
+          s = s.replace(f"define( 'H2OSM_VERSION', '{base}' )", f"define( 'H2OSM_VERSION', '{version}' )")
+          main.write_text(s)
 
           plugin = root / "includes/class-plugin.php"
-          s = plugin.read_text()
-          if "Salient_Setup::register();" not in s:
-              s = s.replace("        Funnels::register();", "        Funnels::register();\n        Salient_Setup::register();")
-          plugin.write_text(s)
+          p = plugin.read_text()
+          if "Salient_Setup::register();" not in p:
+              p = p.replace("Funnels::register();", "Funnels::register();\n        Salient_Setup::register();")
+          plugin.write_text(p)
+
+          sync = root / "includes/class-sync.php"
+          q = sync.read_text()
+          marker = "        update_option( self::STATE_OPTION, $state, false );"
+          if "Salient_Setup::configure();" not in q:
+              q = q.replace(marker, marker + "\n\n        Salient_Setup::configure();")
+          sync.write_text(q)
 
           profile = root / "profiles/templa-design.php"
-          p = profile.read_text()
+          content = profile.read_text()
 
-          # Salient owns row geometry. Do not combine the Salient type attribute
-          # with WPBakery's generic stretch_row/full_width attributes.
-          p = re.sub(r'\s+full_width="stretch_row_content_no_spaces"', '', p)
-          p = re.sub(r'\s+full_width="stretch_row"', '', p)
-          p = p.replace(' h2osm-fullbleed', '')
-          p = p.replace(' h2osm-bg-row', '')
+          content = content.replace(f"h2o-site-migrator:templa-design:{base}", f"h2o-site-migrator:templa-design:{version}")
+          content = content.replace(f'data-h2osm-release="{base}"', f'data-h2osm-release="{version}"')
+          content = re.sub(r"'version'\s*=>\s*'[^']+'", f"'version' => '{version}'", content, count=1)
 
-          # Put hero/subhero backgrounds on the native Salient row itself instead
-          # of creating an extra HTML section which the builder cannot reason about.
-          hero_patterns = [
-              (
-                  r'\[vc_row type="full_width_content" el_class="h2osm-hero-row"\]\[vc_column\]\[vc_column_text\]\s*<section class="h2osm-hero" style="--h2osm-bg:url\(\'([^\']+)\'\)">\s*<div class="h2osm-hero-overlay"></div>\s*<div class="h2osm-hero-copy">(.*?)</div>\s*</section>\s*\[/vc_column_text\]\[/vc_column\]\[/vc_row\]',
-                  lambda m: '[vc_row type="full_width_content" bg_image="' + m.group(1) + '" bg_position="center center" bg_repeat="no-repeat" scene_position="center" text_color="light" text_align="left" top_padding="14%" bottom_padding="14%" overlay_strength="0.35" el_class="h2osm-hero-row"][vc_column column_padding="padding-8-percent" column_padding_position="left-right"][vc_column_text]<div class="h2osm-hero-copy">' + m.group(2).strip() + '</div>[/vc_column_text][/vc_column][/vc_row]'
-              ),
-              (
-                  r'\[vc_row type="full_width_content" el_class="h2osm-visual-row"\]\[vc_column\]\[vc_column_text\]<section class="h2osm-subhero" style="--h2osm-bg:url\(\'([^\']+)\'\)"><div class="h2osm-hero-overlay"></div><div>(.*?)</div></section>\[/vc_column_text\]\[/vc_column\]\[/vc_row\]',
-                  lambda m: '[vc_row type="full_width_content" bg_image="' + m.group(1) + '" bg_position="center center" bg_repeat="no-repeat" scene_position="center" text_color="light" text_align="left" top_padding="10%" bottom_padding="10%" overlay_strength="0.35" el_class="h2osm-visual-row"][vc_column column_padding="padding-8-percent" column_padding_position="left-right"][vc_column_text]' + m.group(2).strip() + '[/vc_column_text][/vc_column][/vc_row]'
-              ),
-          ]
-          for pattern, repl in hero_patterns:
-              p, _ = re.subn(pattern, repl, p, flags=re.S)
+          attr_re = re.compile(r'([A-Za-z0-9_:-]+)="([^"]*)"')
 
-          # Keep one semantic row for each section; no empty structural rows.
-          p = re.sub(r'\[vc_row([^\]]*)\]\[vc_column([^\]]*)\]\s*\[/vc_column\]\[/vc_row\]', '', p, flags=re.S)
-          p = re.sub(r'\[vc_row([^\]]*)\]\s*\[/vc_row\]', '', p, flags=re.S)
+          row_defaults = {
+              "full_screen_row_position":"middle",
+              "column_margin":"default",
+              "column_direction":"default",
+              "column_direction_tablet":"default",
+              "column_direction_phone":"default",
+              "scene_position":"center",
+              "text_color":"dark",
+              "text_align":"left",
+              "row_border_radius":"none",
+              "row_border_radius_applies":"bg",
+              "overflow":"visible",
+              "overlay_strength":"0.3",
+              "gradient_direction":"left_to_right",
+              "shape_divider_position":"bottom",
+              "bg_image_animation":"none",
+              "gradient_type":"default",
+              "shape_type":"",
+          }
 
-          p = p.replace(f"h2o-site-migrator:templa-design:{base}", f"h2o-site-migrator:templa-design:{version}")
-          p = p.replace(f'data-h2osm-release="{base}"', f'data-h2osm-release="{version}"')
-          p = re.sub(r"'version'\s*=>\s*'[^']+'", f"'version' => '{version}'", p, count=1)
-          profile.write_text(p)
+          col_defaults = {
+              "column_padding":"no-extra-padding",
+              "column_padding_tablet":"inherit",
+              "column_padding_phone":"inherit",
+              "column_padding_position":"all",
+              "column_element_direction_desktop":"default",
+              "column_element_spacing":"default",
+              "desktop_text_alignment":"default",
+              "tablet_text_alignment":"default",
+              "phone_text_alignment":"default",
+              "background_color_opacity":"1",
+              "background_hover_color_opacity":"1",
+              "column_backdrop_filter":"none",
+              "column_shadow":"none",
+              "column_border_radius":"none",
+              "column_link_target":"_self",
+              "column_position":"default",
+              "gradient_direction":"left_to_right",
+              "overlay_strength":"0.3",
+              "width":"1/1",
+              "tablet_width_inherit":"default",
+              "animation_type":"default",
+              "bg_image_animation":"none",
+              "border_type":"simple",
+              "column_border_width":"none",
+              "column_border_style":"solid",
+              "column_padding_type":"default",
+              "gradient_type":"default",
+          }
+
+          css_text = (root / "assets/frontend.css").read_text()
+          def css_var(name, fallback):
+              m = re.search(r'--' + re.escape(name) + r'\s*:\s*([^;]+);', css_text)
+              return m.group(1).strip() if m else fallback
+          black = css_var("h2osm-black", "#171717")
+          cream = css_var("h2osm-cream", "#f4f0e7")
+
+          def attrs_to_dict(raw):
+              return {k:v for k,v in attr_re.findall(raw)}
+
+          def attrs_to_string(attrs):
+              return " ".join(f'{k}="{v}"' for k,v in attrs.items())
+
+          def normalize_row(m):
+              attrs = attrs_to_dict(m.group(1))
+              for k,v in row_defaults.items():
+                  attrs.setdefault(k,v)
+              row_type = attrs.get("type","in_container")
+              cls = attrs.get("el_class","")
+
+              if "h2osm-hero-row" in cls or "h2osm-visual-row" in cls:
+                  attrs["type"] = "full_width_content"
+                  attrs["text_color"] = "light"
+                  attrs["bg_position"] = attrs.get("bg_position") or "center center"
+                  attrs["bg_repeat"] = attrs.get("bg_repeat") or "no-repeat"
+                  attrs["scene_position"] = "center"
+                  attrs["overlay_strength"] = attrs.get("overlay_strength") or "0.3"
+              elif row_type == "full_width_background":
+                  attrs["type"] = "full_width_background"
+
+              if "h2osm-section-dark" in cls:
+                  attrs["bg_color"] = black
+                  attrs["text_color"] = "light"
+              elif "h2osm-section-cream" in cls:
+                  attrs["bg_color"] = cream
+                  attrs["text_color"] = "dark"
+
+              if "h2osm-section" in cls and "top_padding" not in attrs:
+                  attrs["top_padding"] = "6%"
+                  attrs["bottom_padding"] = "6%"
+
+              return "[vc_row " + attrs_to_string(attrs) + "]"
+
+          def normalize_col(m):
+              attrs = attrs_to_dict(m.group(1))
+              for k,v in col_defaults.items():
+                  attrs.setdefault(k,v)
+              return "[vc_column " + attrs_to_string(attrs) + "]"
+
+          content = re.sub(r'\[vc_row([^\]]*)\]', normalize_row, content)
+          content = re.sub(r'\[vc_column([^\]]*)\]', normalize_col, content)
+
+          # Remove structurally empty rows/columns.
+          previous = None
+          while previous != content:
+              previous = content
+              content = re.sub(r'\[vc_row[^\]]*\]\s*\[vc_column[^\]]*\]\s*\[/vc_column\]\s*\[/vc_row\]', '', content, flags=re.S)
+              content = re.sub(r'\[vc_row[^\]]*\]\s*\[/vc_row\]', '', content, flags=re.S)
+
+          profile.write_text(content)
 
           css = root / "assets/frontend.css"
           c = css.read_text()
-          # Remove geometry hacks. Width belongs to Salient row types.
-          c = re.sub(r'(?s)\.h2osm-fullbleed\s*\{.*?\}', '', c)
-          c = re.sub(r'(?s)\.h2osm-hero-row\s*>\s*\.span_12\s*\{.*?\}', '', c)
-          c = re.sub(r'(?s)\.h2osm-visual-row\s*>\s*\.span_12\s*\{.*?\}', '', c)
-          c = c.replace('width:100vw;', '')
-          c = c.replace('width: 100vw;', '')
-          c = c.replace('margin-left:calc(50% - 50vw);', '')
-          c = c.replace('margin-left: calc(50% - 50vw);', '')
+
+          # Strip row-level geometry/background hacks. Salient owns these.
+          row_tokens = (
+              ".h2osm-fullbleed",
+              ".h2osm-hero-row",
+              ".h2osm-visual-row",
+              ".h2osm-bg-row",
+              ".h2osm-site>.h2osm-section",
+              ".h2osm-site > .h2osm-section",
+              ".h2osm-site>.h2osm-service-grid",
+              ".h2osm-site > .h2osm-service-grid",
+              ".h2osm-site>.h2osm-project-grid",
+              ".h2osm-site > .h2osm-project-grid",
+              ".row_col_wrap_12",
+          )
+
+          out = []
+          pos = 0
+          for match in re.finditer(r'([^{}]+)\{([^{}]*)\}', c, re.S):
+              out.append(c[pos:match.start()])
+              selector = match.group(1)
+              body = match.group(2)
+              if any(token in selector for token in row_tokens):
+                  # Keep no custom rule at all for structural rows.
+                  out.append("")
+              else:
+                  out.append(selector + "{" + body + "}")
+              pos = match.end()
+          out.append(c[pos:])
+          c = "".join(out)
+
+          # Hard guard against the exact hacks that caused cut/off-center rows.
+          c = re.sub(r'(?i)width\s*:\s*100vw\s*!?important?\s*;?', '', c)
+          c = re.sub(r'(?i)margin-left\s*:\s*calc\([^;]*50vw[^;]*\)\s*!?important?\s*;?', '', c)
+          c = re.sub(r'(?i)margin-right\s*:\s*calc\([^;]*50vw[^;]*\)\s*!?important?\s*;?', '', c)
           css.write_text(c)
           PY
 
           {
             echo "## $VERSION — 2026-10-05"
-            echo "- Corrige la geometría de filas: usa únicamente type=full_width_content o type=full_width_background de Salient, sin mezclar stretch_row de WPBakery."
-            echo "- Elimina hacks 100vw/margin-left y clases fullbleed que desplazaban/cortaban las filas."
-            echo "- Mueve las imágenes hero/subhero al background nativo de la Row de Salient; deja de envolverlas en secciones HTML paralelas."
-            echo "- Elimina filas estructuralmente vacías."
-            echo "- Crea/actualiza el menú Templa Principal con WordPress Core y lo asigna a la ubicación pública top_nav registrada por Salient."
-            echo "- No escribe opciones internas de Salient/Redux: logo, colores y footer siguen perteneciendo a Header Navigation, Accent Colors y Global Sections."
+            echo "- Configura Header Navigation de Salient con el logo Templa y parámetros que alimentan los data-* del header."
+            echo "- Crea/actualiza el menú Principal y lo asigna a top_nav después de sincronizar las páginas."
+            echo "- Normaliza cada vc_row y vc_column con los atributos nativos completos de Salient/WPBakery."
+            echo "- Full Width Content y Full Width Background quedan definidos sólo por type, sin stretch_row paralelo ni hacks 100vw."
+            echo "- Los fondos oscuros/crema pasan a bg_color de la Row nativa; ya no dependen de CSS estructural."
+            echo "- Elimina reglas CSS estructurales que modificaban width, container, backgrounds o row_col_wrap_12."
+            echo "- Elimina filas vacías y bloquea el release si queda alguna."
             echo
             cat "$ROOT/CHANGELOG.md"
           } > "$WORK/CHANGELOG.md"
@@ -219,27 +364,34 @@ jobs:
 
           php -l "$ROOT/h2o-ia-site-migrator.php" >/dev/null
           php -l "$ROOT/includes/class-plugin.php" >/dev/null
+          php -l "$ROOT/includes/class-sync.php" >/dev/null
           php -l "$ROOT/includes/class-salient-setup.php" >/dev/null
           php -l "$ROOT/profiles/templa-design.php" >/dev/null
+
           grep -q "Version: $VERSION" "$ROOT/h2o-ia-site-migrator.php"
-          grep -q "Salient_Setup::register();" "$ROOT/includes/class-plugin.php"
-          grep -q "top_nav" "$ROOT/includes/class-salient-setup.php"
+          grep -q "Salient_Setup::configure();" "$ROOT/includes/class-sync.php"
+          grep -q "\['top_nav'\] = \$menu_id" "$ROOT/includes/class-salient-setup.php"
+          grep -q "TEMPLA_BLACKsm.png" "$ROOT/includes/class-salient-setup.php"
+          grep -q "full_screen_row_position=\"middle\"" "$ROOT/profiles/templa-design.php"
+          grep -q "column_margin=\"default\"" "$ROOT/profiles/templa-design.php"
+          grep -q "row_border_radius=\"none\"" "$ROOT/profiles/templa-design.php"
+          grep -q "column_padding=\"no-extra-padding\"" "$ROOT/profiles/templa-design.php"
           ! grep -q 'full_width="stretch_row' "$ROOT/profiles/templa-design.php"
-          ! grep -q 'h2osm-fullbleed' "$ROOT/profiles/templa-design.php"
           ! grep -q 'width:100vw' "$ROOT/assets/frontend.css"
-          ! grep -q 'margin-left:calc(50% - 50vw)' "$ROOT/assets/frontend.css"
-          grep -q 'type="full_width_content"' "$ROOT/profiles/templa-design.php"
-          grep -q 'type="full_width_background"' "$ROOT/profiles/templa-design.php"
+          ! grep -q 'row_col_wrap_12' "$ROOT/assets/frontend.css"
 
           python3 - "$ROOT/profiles/templa-design.php" <<'PY'
-          import re, sys, pathlib
-          s=pathlib.Path(sys.argv[1]).read_text()
-          for row in re.findall(r'\[vc_row[^\]]*\].*?\[/vc_row\]', s, re.S):
-              inner=re.sub(r'\[/?vc_column[^\]]*\]|\[/?vc_column_text[^\]]*\]|\[/?vc_row[^\]]*\]','',row)
-              inner=re.sub(r'<!--.*?-->','',inner,flags=re.S).strip()
-              if not re.sub(r'\s+','',inner):
+          import re, pathlib, sys
+          s = pathlib.Path(sys.argv[1]).read_text()
+          rows = re.findall(r'\[vc_row[^\]]*\].*?\[/vc_row\]', s, re.S)
+          if not rows:
+              raise SystemExit('no vc_rows found')
+          for row in rows:
+              inner = re.sub(r'\[/?vc_column[^\]]*\]|\[/?vc_column_text[^\]]*\]|\[/?vc_row[^\]]*\]', '', row)
+              inner = re.sub(r'<!--.*?-->', '', inner, flags=re.S).strip()
+              if not re.sub(r'\s+', '', inner):
                   raise SystemExit('empty vc_row found')
-          print('NO_EMPTY_ROWS')
+          print('SALIENT_ROWS_OK', len(rows))
           PY
 
           (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
@@ -289,7 +441,7 @@ jobs:
             gh release create "$TAG" "$PACKAGE" dist/release.json \
               --target main \
               --title "h2o IA Site Migrator $VERSION" \
-              --notes "Limpieza estructural Salient: filas nativas sin doble sistema de ancho, sin hacks 100vw, sin filas vacías y menú WordPress asignado a top_nav. No toca internals de Salient."
+              --notes "Corrección Salient nativa: Header Navigation configurado con logo, menú Principal asignado a top_nav, vc_row/vc_column con data attributes completos y eliminación de CSS estructural que interfería con Full Width Content/Background."
           fi
 
       - name: Publish updater chunks and manifest
