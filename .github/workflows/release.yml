@@ -384,7 +384,7 @@ jobs:
           p = p.replace(' h2osm-fullbleed', '').replace(' h2osm-bg-row', '')
 
           # Remove safe duplicate closing builder tags; fail on true mis-nesting.
-          token_re = re.compile(r'\[(?P<close>/)?(?P<tag>vc_row|vc_column|vc_column_text)(?P<attrs>[^\]]*)\]')
+          token_re = re.compile(r'\[(?P<close>/)?(?P<tag>vc_column_text|vc_column|vc_row)(?P<attrs>[^\]]*)\]')
           out, stack, pos = [], [], 0
           for m in token_re.finditer(p):
               out.append(p[pos:m.start()])
@@ -451,7 +451,7 @@ jobs:
           python3 - "$ROOT/profiles/templa-design.php" <<'PY'
           import pathlib, re, sys
           s = pathlib.Path(sys.argv[1]).read_text()
-          token_re = re.compile(r'\[(?P<close>/)?(?P<tag>vc_row|vc_column|vc_column_text)(?:[^\]]*)\]')
+          token_re = re.compile(r'\[(?P<close>/)?(?P<tag>vc_column_text|vc_column|vc_row)(?:[^\]]*)\]')
           stack=[]
           for m in token_re.finditer(s):
               tag=m.group('tag')
