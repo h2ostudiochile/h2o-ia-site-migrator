@@ -1,0 +1,76 @@
+name: Release h2o IA Site Migrator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bootstrap/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h2o-ia-site-migrator-release
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rebuild package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cat bootstrap/part-*.b64 | tr -d '\n\r ' | base64 --decode > dist/package.zip
+          EXPECTED="$(tr -d '\n\r ' < bootstrap/package.sha256)"
+          ACTUAL="$(sha256sum dist/package.zip | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED"
+          unzip -t dist/package.zip >/dev/null
+
+          VERSION="$(unzip -p dist/package.zip h2o-ia-site-migrator/h2o-ia-site-migrator.php | sed -n 's/^[[:space:]]*\*[[:space:]]*Version:[[:space:]]*//p' | head -n1 | tr -d '\r')"
+          test -n "$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          unzip -p dist/package.zip h2o-ia-site-migrator/h2o-ia-site-migrator.php | grep -q "Update URI: https://github.com/h2ostudiochile/h2o-ia-site-migrator"
+          unzip -p dist/package.zip h2o-ia-site-migrator/includes/class-updater.php | grep -q "update_plugins_github.com"
+
+          mv dist/package.zip "dist/h2o-ia-site-migrator-$VERSION.zip"
+
+          PACKAGE_URL="https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v$VERSION/h2o-ia-site-migrator-$VERSION.zip"
+          node -e '
+            const fs=require("fs");
+            const [version,url,sha]=process.argv.slice(1);
+            fs.writeFileSync("dist/release.json",JSON.stringify({
+              version,
+              package_url:url,
+              package_sha256:sha,
+              tested:"7.1",
+              requires_php:"8.0"
+            },null,2)+"\n");
+          ' "$VERSION" "$PACKAGE_URL" "$ACTUAL"
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          PACKAGE="dist/h2o-ia-site-migrator-$VERSION.zip"
+          MANIFEST="dist/release.json"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PACKAGE" "$MANIFEST" --clobber
+          else
+            gh release create "$TAG" "$PACKAGE" "$MANIFEST" \
+              --target "$GITHUB_SHA" \
+              --title "h2o IA Site Migrator $VERSION" \
+              --notes "Canal de actualización nativo por GitHub Releases con verificación SHA-256. Templa mantiene / intacto y /inicio/ como entorno de prueba."
+          fi
