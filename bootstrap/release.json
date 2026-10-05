@@ -3,9 +3,12 @@
   "package_id": "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256",
   "package_sha256": "7ba7b1f0a070aa193c709b3b37387b7aa7d35055484a31e47b9529c3288e17d1",
   "parts": [
-    "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/part-01.b64",
-    "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/part-02.b64",
-    "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/part-03.b64"
+    "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/1.0.4/part-01.b64",
+    "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/1.0.4/part-02.b64",
+    "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/1.0.4/part-03.b64",
+    "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/1.0.4/part-04.b64",
+    "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/1.0.4/part-05.b64",
+    "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/1.0.4/part-06.b64"
   ],
   "tested": "7.1",
   "requires_php": "8.0"
