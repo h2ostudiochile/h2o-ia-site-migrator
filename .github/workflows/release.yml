@@ -22,62 +22,109 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Build 1.0.6 from current plugin with known-good layout
+      - name: Build 1.0.7 editorial container fix
         shell: bash
         run: |
           set -euo pipefail
 
-          BASE_VERSION="1.0.5"
-          VERSION="1.0.6"
-          GOOD_REF="1645d5713a9d727138cf66e6cb7480be8564acd6"
+          BASE_VERSION="1.0.6"
+          VERSION="1.0.7"
           WORK="$RUNNER_TEMP/h2osm-$VERSION"
           DIST="$GITHUB_WORKSPACE/dist"
 
           rm -rf "$WORK" "$DIST"
-          mkdir -p "$WORK/current" "$WORK/good" "$DIST/parts"
+          mkdir -p "$WORK/current" "$DIST/parts"
 
-          # Rebuild the current 1.0.5 package from immutable chunks.
-          cat bootstrap/1.0.5/v2-part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
+          cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
           unzip -q "$WORK/current.zip" -d "$WORK/current"
           ROOT="$WORK/current/h2o-ia-site-migrator"
 
-          # Rebuild the visually correct 1.0.3 package and restore ONLY its layout CSS.
-          for i in 01 02 03; do
-            git show "$GOOD_REF:bootstrap/part-$i.b64"
-          done | tr -d '\n\r ' | base64 --decode > "$WORK/good.zip"
-          unzip -q "$WORK/good.zip" -d "$WORK/good"
-          GOOD="$WORK/good/h2o-ia-site-migrator"
-
-          cp "$GOOD/assets/frontend.css" "$ROOT/assets/frontend.css"
-
-          # Keep the Salient/Nectar blog improvement but do not alter row geometry.
           cat >> "$ROOT/assets/frontend.css" <<'CSS'
 
-          /* 1.0.6 — Blog cosmetic layer only.
-             Row geometry is delegated to Salient/WPBakery native full-width modes. */
-          .h2osm-managed-page .h2osm-salient-blog-row .nectar-post-grid-wrap{
-            margin-top:0!important;
+          /* 1.0.7 — Salient Full Width Background semantics.
+             The row/background spans the viewport; editorial content stays in the site container.
+             No 100vw translations are used here. */
+          .h2osm-managed-page .h2osm-site > .h2osm-section,
+          .h2osm-managed-page .h2osm-site > .h2osm-service-grid,
+          .h2osm-managed-page .h2osm-site > .h2osm-project-grid,
+          .h2osm-managed-page .h2osm-site > .h2osm-salient-blog-row,
+          .h2osm-managed-page .h2osm-site > .h2osm-blog-grid,
+          .h2osm-managed-page .h2osm-site > .h2osm-blog-list,
+          .h2osm-managed-page .h2osm-site > .h2osm-value-grid,
+          .h2osm-managed-page .h2osm-site > .h2osm-service-detail-grid,
+          .h2osm-managed-page .h2osm-site > .h2osm-project-categories,
+          .h2osm-managed-page .h2osm-site > .h2osm-before-after,
+          .h2osm-managed-page .h2osm-site > .h2osm-page-title,
+          .h2osm-managed-page .h2osm-site > .h2osm-contact-hero,
+          .h2osm-managed-page .h2osm-site > .h2osm-contact-grid {
+            width:100%!important;
+            max-width:none!important;
+            margin-left:0!important;
+            margin-right:0!important;
+            padding-left:0!important;
+            padding-right:0!important;
           }
-          .h2osm-managed-page .h2osm-salient-blog-row .nectar-post-grid-item{
-            background:transparent!important;
+
+          .h2osm-managed-page .h2osm-site > .h2osm-section > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-service-grid > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-project-grid > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-salient-blog-row > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-blog-grid > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-blog-list > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-value-grid > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-service-detail-grid > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-project-categories > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-before-after > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-page-title > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-contact-hero > .row_col_wrap_12,
+          .h2osm-managed-page .h2osm-site > .h2osm-contact-grid > .row_col_wrap_12 {
+            width:calc(100% - 180px)!important;
+            max-width:1245px!important;
+            margin-left:auto!important;
+            margin-right:auto!important;
+            padding-left:0!important;
+            padding-right:0!important;
           }
-          .h2osm-managed-page .h2osm-salient-blog-row .nectar-post-grid-item .content{
-            padding-top:18px!important;
+
+          @media (max-width:999px) {
+            .h2osm-managed-page .h2osm-site > .h2osm-section > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-service-grid > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-project-grid > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-salient-blog-row > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-blog-grid > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-blog-list > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-value-grid > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-service-detail-grid > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-project-categories > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-before-after > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-page-title > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-contact-hero > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-contact-grid > .row_col_wrap_12 {
+              width:calc(100% - 48px)!important;
+              max-width:none!important;
+            }
           }
-          .h2osm-managed-page .h2osm-salient-blog-row .nectar-post-grid-item h2,
-          .h2osm-managed-page .h2osm-salient-blog-row .nectar-post-grid-item h3{
-            letter-spacing:-.035em!important;
-          }
-          .h2osm-managed-page .h2osm-salient-blog-row .nectar-post-grid-item img{
-            transition:transform .45s ease!important;
+
+          @media (max-width:690px) {
+            .h2osm-managed-page .h2osm-site > .h2osm-section > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-service-grid > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-project-grid > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-salient-blog-row > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-blog-grid > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-blog-list > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-value-grid > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-service-detail-grid > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-project-categories > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-before-after > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-page-title > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-contact-hero > .row_col_wrap_12,
+            .h2osm-managed-page .h2osm-site > .h2osm-contact-grid > .row_col_wrap_12 {
+              width:calc(100% - 36px)!important;
+            }
           }
           CSS
 
-          # Version bump and sync marker bump. Keep the current 1.0.5 profile,
-          # including native Salient row types and Nectar Post Grid markup.
           sed -i "s/Version: $BASE_VERSION/Version: $VERSION/" "$ROOT/h2o-ia-site-migrator.php"
           sed -i "s/define( 'H2OSM_VERSION', '$BASE_VERSION' )/define( 'H2OSM_VERSION', '$VERSION' )/" "$ROOT/h2o-ia-site-migrator.php"
           sed -i "s/h2o-site-migrator:templa-design:$BASE_VERSION/h2o-site-migrator:templa-design:$VERSION/g" "$ROOT/profiles/templa-design.php"
@@ -85,24 +132,21 @@ jobs:
 
           {
             echo "## $VERSION — 2026-10-05"
-            echo "- Restaura exactamente la geometría CSS de la primera maqueta aprobada."
-            echo "- Full Width Content queda reservado a hero, imagen y video."
-            echo "- Full Width Background queda delegado al modo nativo de Salient para texto y contenido editorial."
-            echo "- Conserva Nectar Post Grid e imágenes destacadas en Blog."
+            echo "- Corrige Full Width Background: fondo de borde a borde con contenido dentro del container editorial."
+            echo "- Mantiene Full Width Content del hero/visuales sin cambios."
+            echo "- Conserva Nectar Post Grid del Blog."
             echo
             cat "$ROOT/CHANGELOG.md"
           } > "$WORK/CHANGELOG.md"
           mv "$WORK/CHANGELOG.md" "$ROOT/CHANGELOG.md"
 
-          # Guard rails: do not publish another geometry override.
           php -l "$ROOT/h2o-ia-site-migrator.php" >/dev/null
           php -l "$ROOT/profiles/templa-design.php" >/dev/null
           grep -q "Version: $VERSION" "$ROOT/h2o-ia-site-migrator.php"
           grep -q 'type="full_width_content" full_width="stretch_row_content_no_spaces"' "$ROOT/profiles/templa-design.php"
           grep -q 'type="full_width_background" el_class="h2osm-section"' "$ROOT/profiles/templa-design.php"
           grep -q 'nectar_post_grid' "$ROOT/profiles/templa-design.php"
-          grep -q 'left:50%!important;right:50%!important' "$ROOT/assets/frontend.css"
-          ! grep -q 'restore canonical Salient row geometry' "$ROOT/assets/frontend.css"
+          grep -q 'width:calc(100% - 180px)!important' "$ROOT/assets/frontend.css"
           ! grep -q 'margin-left:calc(50% - 50vw)' "$ROOT/assets/frontend.css"
 
           (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
@@ -153,7 +197,7 @@ jobs:
             gh release create "$TAG" "$PACKAGE" dist/release.json \
               --target main \
               --title "h2o IA Site Migrator $VERSION" \
-              --notes "Restaura la geometría de la primera maqueta aprobada: Full Width Content sólo para hero/visuales; Full Width Background nativo de Salient para contenido editorial. Mantiene Nectar Post Grid en Blog."
+              --notes "Corrige Full Width Background: fondo edge-to-edge y contenido dentro del container editorial. Hero Full Width Content permanece intacto. Conserva Nectar Post Grid."
           fi
 
       - name: Publish updater chunks and manifest
