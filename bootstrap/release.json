@@ -1,7 +1,7 @@
 {
-  "version": "1.0.3",
+  "version": "1.0.4",
   "package_id": "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256",
-  "package_sha256": "d72367d2c5c1db22080103bcf27b4f76b9d3880c411e5b95e43bd532c6ed7895",
+  "package_sha256": "7ba7b1f0a070aa193c709b3b37387b7aa7d35055484a31e47b9529c3288e17d1",
   "parts": [
     "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/part-01.b64",
     "https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/part-02.b64",
