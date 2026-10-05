@@ -110,7 +110,17 @@ jobs:
                   $options['header-resize-on-scroll'] = '1';
                   $options['header-box-shadow']     = 'small';
 
-                  update_option( 'salient_redux', $options, false );
+                  if ( class_exists( '\\Redux' ) ) {
+                      foreach ( $options as $key => $value ) {
+                          if ( method_exists( '\\Redux', 'set_option' ) ) {
+                              \\Redux::set_option( 'salient_redux', $key, $value );
+                          } elseif ( method_exists( '\\Redux', 'setOption' ) ) {
+                              \\Redux::setOption( 'salient_redux', $key, $value );
+                          }
+                      }
+                  } else {
+                      update_option( 'salient_redux', $options, false );
+                  }
               }
 
               private static function configure_primary_menu(): void {
@@ -473,7 +483,7 @@ jobs:
 
           {
             echo "## $VERSION — 2026-10-05"
-            echo "- Corrige Header Navigation: el logo Templa se guarda como Redux media real y alimenta los data-* nativos del header."
+            echo "- Corrige Header Navigation: el logo Templa se guarda como Redux media real mediante la API de Redux y alimenta los data-* nativos del header."
             echo "- Crea/actualiza el menú Principal y lo asigna a top_nav después de sincronizar las páginas."
             echo "- Normaliza cada vc_row y vc_column con los atributos nativos completos de Salient/WPBakery."
             echo "- Full Width Content y Full Width Background quedan definidos sólo por type, sin stretch_row paralelo ni hacks 100vw."
