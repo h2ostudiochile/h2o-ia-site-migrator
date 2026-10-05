@@ -141,7 +141,7 @@ jobs:
     padding-right:18px!important;
   }
 }
-CSS
+          CSS
 
           {
             echo "## $VERSION — 2026-10-05"
@@ -191,7 +191,7 @@ CSS
             tested: '7.1',
             requires_php: '8.0'
           }, null, 2) + '\n');
-NODE
+          NODE
 
       - name: Publish GitHub Release
         shell: bash
