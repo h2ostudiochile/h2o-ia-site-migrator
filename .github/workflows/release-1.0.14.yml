@@ -316,6 +316,35 @@ jobs:
               raise SystemExit(f'LEGACY_HERO_WRAPPER_REMAINS hero={hero_count} subhero={subhero_count}: {snippet}')
 
           print(f'NATIVE_HERO_CONVERSION hero={hero_count} subhero={subhero_count}')
+          # Convert image cards that used CSS custom properties into
+          # ordinary theme-native content inside the existing WPBakery columns.
+          def native_image_card(match):
+              href = match.group('href')
+              image = match.group('image')
+              number = match.group('number').strip()
+              title = match.group('title').strip()
+              description = match.group('description').strip()
+              return (
+                  '<figure><a href="' + href + '"><img src="' + image + '" alt="' + title + '"></a></figure>'
+                  '<p><strong>' + number + '</strong></p>'
+                  '<h3><a href="' + href + '">' + title + '</a></h3>'
+                  '<p>' + description + '</p>'
+              )
+
+          card_pattern = re.compile(
+              r'''<a class="h2osm-image-card" href="(?P<href>[^"]+)" style="--h2osm-card-bg:url\(['"](?P<image>.*?)['"]\)">\s*'''
+              r'''<span>(?P<number>.*?)</span>\s*'''
+              r'''<h3>(?P<title>.*?)</h3>\s*'''
+              r'''<p>(?P<description>.*?)</p>\s*</a>''',
+              re.S
+          )
+          p, card_count = card_pattern.subn(native_image_card, p)
+          if '--h2osm-card-bg:' in p:
+              pos = p.find('--h2osm-card-bg:')
+              snippet = p[max(0,pos-500):pos+1800].replace('\n',' ')
+              raise SystemExit(f'LEGACY_IMAGE_CARD_REMAINS converted={card_count}: {snippet}')
+          print(f'NATIVE_IMAGE_CARD_CONVERSION cards={card_count}')
+
           profile.write_text(p)
 
           # These files embodied the old rendering layer. 1.0.14 has no renderer
