@@ -174,7 +174,7 @@ jobs:
                     const fs = require('fs');
                     const [version, sha] = process.argv.slice(2);
                     const files = fs.readdirSync('dist/parts').sort();
-                    const parts = files.map(f => 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/' + version + '/' + f + '.b64');
+                    const parts = files.map((f,i) => 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/' + version + '/part-' + String(i+1).padStart(2,'0') + '.b64');
                     const manifest = {
                       version,
                       package_id: 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256',
