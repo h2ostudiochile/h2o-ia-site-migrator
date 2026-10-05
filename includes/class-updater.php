@@ -6,25 +6,25 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
- * GitHub release updater for h2o IA Site Migrator.
+ * GitHub-backed updater for h2o IA Site Migrator.
  *
- * The runtime consumes only GitHub's public release API and release assets.
- * No other H2O component, plugin internals or WordPress private data are read.
+ * The updater reads a small public manifest and base64 package chunks from the
+ * component's own GitHub repository. It never reads another plugin's internals.
  */
 final class Updater {
-    private const REPOSITORY = 'h2ostudiochile/h2o-ia-site-migrator';
-    private const UPDATE_URI = 'https://github.com/h2ostudiochile/h2o-ia-site-migrator';
-    private const API_URL = 'https://api.github.com/repos/h2ostudiochile/h2o-ia-site-migrator/releases/latest';
-    private const CACHE_KEY = 'h2osm_release_manifest';
-    private const VERIFY_KEY = 'h2osm_update_verification';
+    private const UPDATE_URI  = 'https://github.com/h2ostudiochile/h2o-ia-site-migrator';
+    private const MANIFEST_URL = 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/release.json';
+    private const CACHE_KEY   = 'h2osm_release_manifest';
+    private const VERIFY_KEY  = 'h2osm_update_verification';
+    private const MAX_PACKAGE_BYTES = 20 * 1024 * 1024;
 
     public static function boot(): void {
         add_filter( 'update_plugins_github.com', array( self::class, 'check' ), 10, 4 );
-        add_filter( 'upgrader_pre_download', array( self::class, 'verify_download' ), 10, 4 );
+        add_filter( 'upgrader_pre_download', array( self::class, 'prepare_package' ), 10, 4 );
         add_filter( 'plugin_row_meta', array( self::class, 'row_meta' ), 10, 2 );
     }
 
-    public static function check( $update, array $plugin_data, string $plugin_file, array $locales ) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed
+    public static function check( $update, array $plugin_data, string $plugin_file, array $locales ) {
         if ( plugin_basename( H2OSM_FILE ) !== $plugin_file ) {
             return $update;
         }
@@ -34,22 +34,14 @@ final class Updater {
             return false;
         }
 
-        set_site_transient(
-            self::VERIFY_KEY,
-            array(
-                'package' => (string) $manifest['package_url'],
-                'sha256'  => (string) $manifest['package_sha256'],
-                'version' => (string) $manifest['version'],
-            ),
-            12 * HOUR_IN_SECONDS
-        );
+        set_site_transient( self::VERIFY_KEY, $manifest, 12 * HOUR_IN_SECONDS );
 
         return array(
             'id'           => self::UPDATE_URI,
             'slug'         => 'h2o-ia-site-migrator',
             'version'      => (string) $manifest['version'],
             'url'          => self::UPDATE_URI,
-            'package'      => (string) $manifest['package_url'],
+            'package'      => (string) $manifest['package_id'],
             'tested'       => isset( $manifest['tested'] ) ? sanitize_text_field( (string) $manifest['tested'] ) : '',
             'requires_php' => isset( $manifest['requires_php'] ) ? sanitize_text_field( (string) $manifest['requires_php'] ) : '8.0',
             'autoupdate'   => false,
@@ -62,46 +54,11 @@ final class Updater {
             return $cached;
         }
 
-        $release = wp_safe_remote_get(
-            self::API_URL,
+        $response = wp_safe_remote_get(
+            self::MANIFEST_URL,
             array(
                 'timeout'     => 10,
                 'redirection' => 2,
-                'headers'     => array(
-                    'Accept'               => 'application/vnd.github+json',
-                    'User-Agent'           => 'h2o-IA-Site-Migrator/' . H2OSM_VERSION,
-                    'X-GitHub-Api-Version' => '2022-11-28',
-                ),
-            )
-        );
-
-        if ( is_wp_error( $release ) || 200 !== (int) wp_remote_retrieve_response_code( $release ) ) {
-            return null;
-        }
-
-        $payload = json_decode( wp_remote_retrieve_body( $release ), true );
-        if ( ! is_array( $payload ) || empty( $payload['assets'] ) || ! is_array( $payload['assets'] ) ) {
-            return null;
-        }
-
-        $manifest_url = '';
-        foreach ( $payload['assets'] as $asset ) {
-            if ( ! is_array( $asset ) || 'release.json' !== ( $asset['name'] ?? '' ) ) {
-                continue;
-            }
-            $manifest_url = isset( $asset['browser_download_url'] ) ? esc_url_raw( (string) $asset['browser_download_url'], array( 'https' ) ) : '';
-            break;
-        }
-
-        if ( '' === $manifest_url ) {
-            return null;
-        }
-
-        $response = wp_safe_remote_get(
-            $manifest_url,
-            array(
-                'timeout'     => 10,
-                'redirection' => 3,
                 'headers'     => array(
                     'Accept'     => 'application/json',
                     'User-Agent' => 'h2o-IA-Site-Migrator/' . H2OSM_VERSION,
@@ -118,24 +75,39 @@ final class Updater {
             return null;
         }
 
-        set_site_transient( self::CACHE_KEY, $manifest, 30 * MINUTE_IN_SECONDS );
+        set_site_transient( self::CACHE_KEY, $manifest, 15 * MINUTE_IN_SECONDS );
         return $manifest;
     }
 
     private static function valid_manifest( array $manifest ): bool {
-        $version = isset( $manifest['version'] ) ? sanitize_text_field( (string) $manifest['version'] ) : '';
-        $package = isset( $manifest['package_url'] ) ? esc_url_raw( (string) $manifest['package_url'], array( 'https' ) ) : '';
-        $sha256  = isset( $manifest['package_sha256'] ) ? strtolower( sanitize_text_field( (string) $manifest['package_sha256'] ) ) : '';
+        $version    = isset( $manifest['version'] ) ? sanitize_text_field( (string) $manifest['version'] ) : '';
+        $package_id = isset( $manifest['package_id'] ) ? esc_url_raw( (string) $manifest['package_id'], array( 'https' ) ) : '';
+        $sha256     = isset( $manifest['package_sha256'] ) ? strtolower( sanitize_text_field( (string) $manifest['package_sha256'] ) ) : '';
+        $parts      = isset( $manifest['parts'] ) && is_array( $manifest['parts'] ) ? $manifest['parts'] : array();
 
-        if ( '' === $version || '' === $package || ! preg_match( '/^[a-f0-9]{64}$/', $sha256 ) ) {
+        if ( '' === $version || '' === $package_id || ! preg_match( '/^[a-f0-9]{64}$/', $sha256 ) || empty( $parts ) || count( $parts ) > 64 ) {
             return false;
         }
 
-        $host = wp_parse_url( $package, PHP_URL_HOST );
-        return in_array( strtolower( (string) $host ), array( 'github.com', 'objects.githubusercontent.com' ), true );
+        $package_host = strtolower( (string) wp_parse_url( $package_id, PHP_URL_HOST ) );
+        if ( 'raw.githubusercontent.com' !== $package_host ) {
+            return false;
+        }
+
+        foreach ( $parts as $part ) {
+            if ( ! is_string( $part ) || '' === $part ) {
+                return false;
+            }
+            $part_url = esc_url_raw( $part, array( 'https' ) );
+            if ( '' === $part_url || 'raw.githubusercontent.com' !== strtolower( (string) wp_parse_url( $part_url, PHP_URL_HOST ) ) ) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
-    public static function verify_download( $reply, string $package, $upgrader, array $hook_extra ) { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed
+    public static function prepare_package( $reply, string $package, $upgrader, array $hook_extra ) {
         if ( false !== $reply ) {
             return $reply;
         }
@@ -144,28 +116,65 @@ final class Updater {
             return false;
         }
 
-        $verification = get_site_transient( self::VERIFY_KEY );
-        if ( ! is_array( $verification ) || empty( $verification['package'] ) || empty( $verification['sha256'] ) ) {
-            return new \WP_Error( 'h2osm_update_unverified', 'h2o IA Site Migrator: no hay datos de verificación para este paquete.' );
+        $manifest = get_site_transient( self::VERIFY_KEY );
+        if ( ! is_array( $manifest ) || ! self::valid_manifest( $manifest ) ) {
+            $manifest = self::manifest();
         }
 
-        if ( ! hash_equals( (string) $verification['package'], $package ) ) {
-            return new \WP_Error( 'h2osm_update_package_mismatch', 'h2o IA Site Migrator: la URL del paquete no coincide con el manifiesto verificado.' );
+        if ( ! is_array( $manifest ) || ! self::valid_manifest( $manifest ) ) {
+            return new \WP_Error( 'h2osm_update_unverified', 'h2o IA Site Migrator: no hay un manifiesto de actualización verificable.' );
         }
 
-        require_once ABSPATH . 'wp-admin/includes/file.php';
-        $download = download_url( $package, 30 );
-        if ( is_wp_error( $download ) ) {
-            return $download;
+        if ( ! hash_equals( (string) $manifest['package_id'], $package ) ) {
+            return new \WP_Error( 'h2osm_update_package_mismatch', 'h2o IA Site Migrator: el identificador del paquete no coincide con el manifiesto.' );
         }
 
-        $actual = hash_file( 'sha256', $download );
-        if ( ! is_string( $actual ) || ! hash_equals( strtolower( (string) $verification['sha256'] ), strtolower( $actual ) ) ) {
-            wp_delete_file( $download );
+        $encoded = '';
+        foreach ( $manifest['parts'] as $part_url ) {
+            $response = wp_safe_remote_get(
+                (string) $part_url,
+                array(
+                    'timeout'     => 15,
+                    'redirection' => 2,
+                    'headers'     => array(
+                        'Accept'     => 'text/plain',
+                        'User-Agent' => 'h2o-IA-Site-Migrator/' . H2OSM_VERSION,
+                    ),
+                )
+            );
+
+            if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+                return new \WP_Error( 'h2osm_update_part_unavailable', 'h2o IA Site Migrator: no fue posible descargar una parte del paquete.' );
+            }
+
+            $encoded .= preg_replace( '/\s+/', '', (string) wp_remote_retrieve_body( $response ) );
+            if ( strlen( $encoded ) > ( self::MAX_PACKAGE_BYTES * 2 ) ) {
+                return new \WP_Error( 'h2osm_update_too_large', 'h2o IA Site Migrator: el paquete excede el tamaño permitido.' );
+            }
+        }
+
+        $binary = base64_decode( $encoded, true );
+        if ( false === $binary || strlen( $binary ) > self::MAX_PACKAGE_BYTES ) {
+            return new \WP_Error( 'h2osm_update_decode_failed', 'h2o IA Site Migrator: el paquete publicado no pudo decodificarse.' );
+        }
+
+        $actual = hash( 'sha256', $binary );
+        if ( ! hash_equals( strtolower( (string) $manifest['package_sha256'] ), strtolower( $actual ) ) ) {
             return new \WP_Error( 'h2osm_update_checksum_mismatch', 'h2o IA Site Migrator: el SHA-256 del paquete no coincide.' );
         }
 
-        return $download;
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        $tmp = wp_tempnam( 'h2o-ia-site-migrator-' . sanitize_file_name( (string) $manifest['version'] ) . '.zip' );
+        if ( ! $tmp ) {
+            return new \WP_Error( 'h2osm_update_temp_failed', 'h2o IA Site Migrator: no fue posible crear el archivo temporal.' );
+        }
+
+        if ( false === file_put_contents( $tmp, $binary ) ) {
+            wp_delete_file( $tmp );
+            return new \WP_Error( 'h2osm_update_write_failed', 'h2o IA Site Migrator: no fue posible preparar el paquete temporal.' );
+        }
+
+        return $tmp;
     }
 
     public static function row_meta( array $links, string $file ): array {
