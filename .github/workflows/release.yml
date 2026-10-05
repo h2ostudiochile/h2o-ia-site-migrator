@@ -113,9 +113,9 @@ jobs:
                   if ( class_exists( '\\Redux' ) ) {
                       foreach ( $options as $key => $value ) {
                           if ( method_exists( '\\Redux', 'set_option' ) ) {
-                              \\Redux::set_option( 'salient_redux', $key, $value );
+                              \Redux::set_option( 'salient_redux', $key, $value );
                           } elseif ( method_exists( '\\Redux', 'setOption' ) ) {
-                              \\Redux::setOption( 'salient_redux', $key, $value );
+                              \Redux::setOption( 'salient_redux', $key, $value );
                           }
                       }
                   } else {
