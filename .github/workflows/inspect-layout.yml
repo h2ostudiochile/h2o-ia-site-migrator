@@ -1,4 +1,4 @@
-name: Inspect 1.0.8 funnel insertion points
+name: Inspect 1.0.12 runtime
 
 on:
   push:
@@ -11,21 +11,23 @@ permissions:
 
 jobs:
   inspect:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect profile
+      - name: Inspect runtime
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf /tmp/h2osm108
-          mkdir -p /tmp/h2osm108
-          cat bootstrap/1.0.8/part-*.b64 | tr -d '\n\r ' | base64 --decode > /tmp/h2osm108.zip
-          unzip -q /tmp/h2osm108.zip -d /tmp/h2osm108
-          ROOT="/tmp/h2osm108/h2o-ia-site-migrator"
-          echo '=== PROFILE HEAD ==='
-          sed -n '1,180p' "$ROOT/profiles/templa-design.php"
-          echo '=== PROFILE MID ==='
-          sed -n '180,380p' "$ROOT/profiles/templa-design.php"
-          echo '=== PLUGIN ==='
-          sed -n '1,220p' "$ROOT/includes/class-plugin.php"
+          rm -rf /tmp/h2osm112
+          mkdir -p /tmp/h2osm112
+          cat bootstrap/1.0.12/part-*.b64 | tr -d '\n\r ' | base64 --decode > /tmp/h2osm112.zip
+          unzip -q /tmp/h2osm112.zip -d /tmp/h2osm112
+          ROOT="/tmp/h2osm112/h2o-ia-site-migrator"
+          echo '=== MAIN ==='
+          sed -n '1,180p' "$ROOT/h2o-ia-site-migrator.php"
+          echo '=== PLUGIN BOOT ==='
+          sed -n '1,260p' "$ROOT/includes/class-plugin.php"
+          echo '=== SYNC ==='
+          sed -n '1,360p' "$ROOT/includes/class-sync.php"
+          echo '=== SALIENT SETUP ==='
+          sed -n '1,320p' "$ROOT/includes/class-salient-setup.php"
