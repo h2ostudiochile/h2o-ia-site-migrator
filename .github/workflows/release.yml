@@ -409,7 +409,16 @@ jobs:
                   # Duplicate closing shortcode: remove it.
                   pass
               else:
-                  raise SystemExit(f'BAD_BUILDER_NESTING closing={tag} stack={stack[-8:]}')
+                  # Canonicalize legacy malformed nesting by closing any inner
+                  # builder elements before closing the requested ancestor.
+                  while stack and stack[-1] != tag:
+                      inner = stack.pop()
+                      out.append(f'[/{inner}]')
+                  if stack and stack[-1] == tag:
+                      stack.pop()
+                      out.append(m.group(0))
+                  else:
+                      raise SystemExit(f'UNRESOLVABLE_BUILDER_NESTING closing={tag} stack={stack[-8:]}')
               pos = m.end()
           out.append(p[pos:])
           p = ''.join(out)
