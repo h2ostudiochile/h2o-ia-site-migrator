@@ -16,20 +16,31 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Rebuild 1.0.3 and inspect layout
+      - name: Compare 1.0.3 good layout with 1.0.5 blog/profile
         shell: bash
         run: |
           set -euo pipefail
+
           REF="1645d5713a9d727138cf66e6cb7480be8564acd6"
-          mkdir -p /tmp/h2osm103
+          rm -rf /tmp/h2osm103 /tmp/h2osm105
+          mkdir -p /tmp/h2osm103 /tmp/h2osm105
+
           for i in 01 02 03; do
             git show "$REF:bootstrap/part-$i.b64"
           done | tr -d '\n\r ' | base64 --decode > /tmp/h2osm103.zip
           unzip -q /tmp/h2osm103.zip -d /tmp/h2osm103
-          ROOT="/tmp/h2osm103/h2o-ia-site-migrator"
-          echo '=== PROFILE ROWS ==='
-          grep -n "\[vc_row" "$ROOT/profiles/templa-design.php" || true
-          echo '=== PROFILE HERO/SERVICE/BLOG CONTEXT ==='
-          grep -nE "h2osm-(hero|subhero|section|service|blog|project)|nectar_post_grid|stretch_row" "$ROOT/profiles/templa-design.php" | head -n 260 || true
-          echo '=== CSS LAYOUT ==='
-          grep -nE "h2osm-(site|hero|subhero|section|service|blog|project)|row_col_wrap|100vw|max-width|margin-left|margin-right" "$ROOT/assets/frontend.css" | head -n 320 || true
+
+          cat bootstrap/1.0.5/v2-part-*.b64 | tr -d '\n\r ' | base64 --decode > /tmp/h2osm105.zip
+          unzip -q /tmp/h2osm105.zip -d /tmp/h2osm105
+
+          GOOD="/tmp/h2osm103/h2o-ia-site-migrator"
+          CUR="/tmp/h2osm105/h2o-ia-site-migrator"
+
+          echo '=== GOOD 1.0.3 SERVICES ==='
+          sed -n '88,98p' "$GOOD/profiles/templa-design.php"
+          echo '=== CURRENT 1.0.5 SERVICES ==='
+          sed -n '88,102p' "$CUR/profiles/templa-design.php"
+          echo '=== CURRENT 1.0.5 BLOG ==='
+          grep -nE 'blog|nectar_post_grid|post_grid|featured' "$CUR/profiles/templa-design.php" | head -n 120 || true
+          echo '=== CURRENT 1.0.5 CSS APPENDED RULES ==='
+          tail -n 150 "$CUR/assets/frontend.css"
