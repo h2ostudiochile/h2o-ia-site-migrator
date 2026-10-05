@@ -1,4 +1,4 @@
-name: Inspect known-good layout
+name: Inspect current Salient integration
 
 on:
   push:
@@ -14,33 +14,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Compare 1.0.3 good layout with 1.0.5 blog/profile
+      - name: Inspect 1.0.7 theme integration and page markup
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf /tmp/h2osm107
+          mkdir -p /tmp/h2osm107
+          cat bootstrap/1.0.7/part-*.b64 | tr -d '\n\r ' | base64 --decode > /tmp/h2osm107.zip
+          unzip -q /tmp/h2osm107.zip -d /tmp/h2osm107
+          ROOT="/tmp/h2osm107/h2o-ia-site-migrator"
 
-          REF="1645d5713a9d727138cf66e6cb7480be8564acd6"
-          rm -rf /tmp/h2osm103 /tmp/h2osm105
-          mkdir -p /tmp/h2osm103 /tmp/h2osm105
+          echo '=== PLUGIN TEMPLATE HOOKS ==='
+          grep -nE 'template_include|managed-page|wp_head|wp_footer|get_header|get_footer|enqueue_assets|template\(' "$ROOT/includes/class-plugin.php" "$ROOT/templates/managed-page.php" || true
 
-          for i in 01 02 03; do
-            git show "$REF:bootstrap/part-$i.b64"
-          done | tr -d '\n\r ' | base64 --decode > /tmp/h2osm103.zip
-          unzip -q /tmp/h2osm103.zip -d /tmp/h2osm103
+          echo '=== PROFILE HEADER / NAV / FOOTER / GLOBAL ==='
+          grep -nEi 'header|nav|menu|logo|footer|global|h2osm-nav|h2osm-footer|TEMPLA_BLACK|Hablemos' "$ROOT/profiles/templa-design.php" | head -n 260 || true
 
-          cat bootstrap/1.0.5/v2-part-*.b64 | tr -d '\n\r ' | base64 --decode > /tmp/h2osm105.zip
-          unzip -q /tmp/h2osm105.zip -d /tmp/h2osm105
+          echo '=== ALL ROWS ==='
+          grep -n '\[vc_row' "$ROOT/profiles/templa-design.php" || true
 
-          GOOD="/tmp/h2osm103/h2o-ia-site-migrator"
-          CUR="/tmp/h2osm105/h2o-ia-site-migrator"
-
-          echo '=== GOOD 1.0.3 SERVICES ==='
-          sed -n '88,98p' "$GOOD/profiles/templa-design.php"
-          echo '=== CURRENT 1.0.5 SERVICES ==='
-          sed -n '88,102p' "$CUR/profiles/templa-design.php"
-          echo '=== CURRENT 1.0.5 BLOG ==='
-          grep -nE 'blog|nectar_post_grid|post_grid|featured' "$CUR/profiles/templa-design.php" | head -n 120 || true
-          echo '=== CURRENT 1.0.5 CSS APPENDED RULES ==='
-          tail -n 150 "$CUR/assets/frontend.css"
+          echo '=== POSSIBLE EMPTY ROWS ==='
+          python3 - <<'PY'
+          import re, pathlib
+          p=pathlib.Path("/tmp/h2osm107/h2o-ia-site-migrator/profiles/templa-design.php")
+          s=p.read_text()
+          for m in re.finditer(r'\[vc_row[^\]]*\](.*?)\[/vc_row\]', s, re.S):
+              inner=m.group(1)
+              cleaned=re.sub(r'\[/?vc_column[^\]]*\]|\[vc_column_text[^\]]*\]|\[/vc_column_text\]|<!--.*?-->','',inner,flags=re.S).strip()
+              if not re.sub(r'\s+','',cleaned):
+                  print(m.group(0)[:500].replace("\n"," "))
+          PY
