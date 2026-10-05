@@ -272,14 +272,14 @@ jobs:
               )
 
           hero_pattern = re.compile(
-              r'\\[vc_row[^\\]]*\\]\\s*'
-              r'\\[vc_column(?!_text)[^\\]]*\\]\\s*'
-              r'\\[vc_column_text[^\\]]*\\]\\s*'
-              r'<section class="h2osm-hero" style="--h2osm-bg:url\\([\\\'"](?P<image>.*?)[\\\'"]\\)">\\s*'
-              r'<div class="h2osm-hero-overlay"></div>\\s*'
-              r'<div class="h2osm-hero-copy">(?P<body>.*?)</div>\\s*'
-              r'</section>\\s*'
-              r'\\[/vc_column_text\\]\\s*\\[/vc_column\\]\\s*\\[/vc_row\\]',
+              r'\[vc_row[^\]]*\]\s*'
+              r'\[vc_column(?!_text)[^\]]*\]\s*'
+              r'\[vc_column_text[^\]]*\]\s*'
+              r'<section class="h2osm-hero" style="--h2osm-bg:url\([\\'"](?P<image>.*?)[\\'"]\)">\s*'
+              r'<div class="h2osm-hero-overlay"></div>\s*'
+              r'<div class="h2osm-hero-copy">(?P<body>.*?)</div>\s*'
+              r'</section>\s*'
+              r'\[/vc_column_text\]\s*\[/vc_column\]\s*\[/vc_row\]',
               re.S
           )
           p, hero_count = hero_pattern.subn(native_hero, p)
@@ -297,14 +297,14 @@ jobs:
               )
 
           subhero_pattern = re.compile(
-              r'\\[vc_row[^\\]]*\\]\\s*'
-              r'\\[vc_column(?!_text)[^\\]]*\\]\\s*'
-              r'\\[vc_column_text[^\\]]*\\]\\s*'
-              r'<section class="h2osm-subhero" style="--h2osm-bg:url\\([\\\'"](?P<image>.*?)[\\\'"]\\)">\\s*'
-              r'<div class="h2osm-hero-overlay"></div>\\s*'
-              r'<div(?: class="h2osm-hero-copy")?>(?P<body>.*?)</div>\\s*'
-              r'</section>\\s*'
-              r'\\[/vc_column_text\\]\\s*\\[/vc_column\\]\\s*\\[/vc_row\\]',
+              r'\[vc_row[^\]]*\]\s*'
+              r'\[vc_column(?!_text)[^\]]*\]\s*'
+              r'\[vc_column_text[^\]]*\]\s*'
+              r'<section class="h2osm-subhero" style="--h2osm-bg:url\([\\'"](?P<image>.*?)[\\'"]\)">\s*'
+              r'<div class="h2osm-hero-overlay"></div>\s*'
+              r'<div(?: class="h2osm-hero-copy")?>(?P<body>.*?)</div>\s*'
+              r'</section>\s*'
+              r'\[/vc_column_text\]\s*\[/vc_column\]\s*\[/vc_row\]',
               re.S
           )
           p, subhero_count = subhero_pattern.subn(native_subhero, p)
@@ -312,7 +312,7 @@ jobs:
           if 'h2osm-hero' in p or 'h2osm-subhero' in p:
               positions = [x for x in (p.find('<section class="h2osm-hero"'), p.find('<section class="h2osm-subhero"')) if x >= 0]
               pos = min(positions) if positions else p.find('h2osm-hero')
-              snippet = p[max(0,pos-1200):pos+4500].replace('\\n',' ')
+              snippet = p[max(0,pos-1200):pos+4500].replace('\n',' ')
               raise SystemExit(f'LEGACY_HERO_WRAPPER_REMAINS hero={hero_count} subhero={subhero_count}: {snippet}')
 
           print(f'NATIVE_HERO_CONVERSION hero={hero_count} subhero={subhero_count}')
