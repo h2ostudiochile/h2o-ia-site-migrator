@@ -1,0 +1,806 @@
+name: Test and release h2o IA Site Migrator 1.0.19
+
+on:
+  push:
+    branches:
+      - main
+      - fix/whatsapp-onboarding-1.0.19
+    paths:
+      - '.github/workflows/release-1.0.19.yml'
+      - 'bootstrap/trigger-1.0.19.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h2o-ia-site-migrator-1.0.19-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build automatic WhatsApp onboarding 1.0.19
+        shell: bash
+        run: |
+          set -Euo pipefail
+          trap 'rc=$?; echo "FAILED line $LINENO: $BASH_COMMAND"; exit "$rc"' ERR
+
+          BASE_VERSION="1.0.18"
+          VERSION="1.0.19"
+          WORK="$RUNNER_TEMP/h2osm-$VERSION"
+          DIST="$GITHUB_WORKSPACE/dist-1019"
+
+          rm -rf "$WORK" "$DIST"
+          mkdir -p "$WORK/current" "$DIST/parts"
+
+          cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
+          unzip -q "$WORK/current.zip" -d "$WORK/current"
+          ROOT="$WORK/current/h2o-ia-site-migrator"
+
+          cat > "$ROOT/includes/class-whatsapp-onboarding.php" <<'PHP'
+          <?php
+          namespace H2O\Site_Migrator;
+
+          if ( ! defined( 'ABSPATH' ) ) {
+              exit;
+          }
+
+          /**
+           * Automatic WhatsApp onboarding after h2o Funnels is installed.
+           *
+           * Rules:
+           * - Discover the number only from the site's public HTTP surface.
+           * - Prefer explicit WhatsApp links over generic telephone references.
+           * - Never infer a missing country code.
+           * - Never choose between ambiguous high-confidence numbers.
+           * - Configure Funnels only through h2o.funnels.resources-admin/v1.
+           * - Never overwrite a manual Funnels configuration.
+           */
+          final class WhatsApp_Onboarding {
+              private const CONTRACT = 'h2o.funnels.resources-admin/v1';
+              private const NAMESPACE = 'h2o-funnels-mktdigital/resources-admin/v1';
+              private const REQUIRED_FUNNELS_VERSION = '2.8.3';
+              private const STATE_OPTION = 'h2osm_whatsapp_onboarding_v1';
+              private const BACKOFF_TRANSIENT = 'h2osm_whatsapp_onboarding_backoff';
+              private const MIN_CONFIDENCE = 80;
+              private const MAX_SCAN_URLS = 6;
+              private const MAX_BODY_BYTES = 1048576;
+              private const TIMEOUT = 7;
+
+              public static function register(): void {
+                  add_action( 'admin_init', array( __CLASS__, 'maybe_run' ), 1200 );
+                  add_action( 'activated_plugin', array( __CLASS__, 'after_plugin_activation' ), 50, 1 );
+              }
+
+              public static function after_plugin_activation( string $plugin ): void {
+                  unset( $plugin );
+                  delete_transient( self::BACKOFF_TRANSIENT );
+              }
+
+              public static function maybe_run(): void {
+                  if ( ! current_user_can( 'manage_options' ) ) {
+                      return;
+                  }
+
+                  $state = get_option( self::STATE_OPTION, array() );
+                  $state = is_array( $state ) ? $state : array();
+                  if ( in_array( (string) ( $state['status'] ?? '' ), array( 'configured', 'manual_preserved' ), true ) ) {
+                      return;
+                  }
+
+                  if ( get_transient( self::BACKOFF_TRANSIENT ) ) {
+                      return;
+                  }
+
+                  $capabilities = self::admin_capabilities();
+                  if ( is_wp_error( $capabilities ) ) {
+                      self::record_state(
+                          'awaiting_funnels',
+                          array(
+                              'error' => $capabilities->get_error_code(),
+                              'message' => $capabilities->get_error_message(),
+                          )
+                      );
+                      set_transient( self::BACKOFF_TRANSIENT, 1, 5 * MINUTE_IN_SECONDS );
+                      return;
+                  }
+
+                  $detected = self::detect_public_phone();
+                  if ( is_wp_error( $detected ) ) {
+                      self::record_state(
+                          'phone_unresolved',
+                          array(
+                              'error' => $detected->get_error_code(),
+                              'message' => $detected->get_error_message(),
+                              'details' => $detected->get_error_data(),
+                          )
+                      );
+                      set_transient( self::BACKOFF_TRANSIENT, 1, 30 * MINUTE_IN_SECONDS );
+                      return;
+                  }
+
+                  $response = self::configure_whatsapp( $detected );
+                  if ( is_wp_error( $response ) ) {
+                      self::record_state(
+                          'configuration_failed',
+                          array(
+                              'error' => $response->get_error_code(),
+                              'message' => $response->get_error_message(),
+                          )
+                      );
+                      set_transient( self::BACKOFF_TRANSIENT, 1, 10 * MINUTE_IN_SECONDS );
+                      return;
+                  }
+
+                  $preserved = ! empty( $response['preserved_manual'] );
+                  self::record_state(
+                      $preserved ? 'manual_preserved' : 'configured',
+                      array(
+                          'phone' => sanitize_text_field( (string) ( $response['phone'] ?? $detected['phone'] ) ),
+                          'funnel_uuid' => strtolower( sanitize_text_field( (string) ( $response['funnel_uuid'] ?? '' ) ) ),
+                          'sitewide' => ! empty( $response['sitewide'] ),
+                          'confidence' => (int) $detected['confidence'],
+                          'evidence_type' => sanitize_key( (string) $detected['evidence_type'] ),
+                          'evidence_url' => esc_url_raw( (string) $detected['source_url'] ),
+                      )
+                  );
+              }
+
+              private static function admin_capabilities(): array|\WP_Error {
+                  $url = rest_url( self::NAMESPACE . '/capabilities' );
+                  $response = wp_safe_remote_get(
+                      $url,
+                      array(
+                          'timeout' => self::TIMEOUT,
+                          'redirection' => 0,
+                          'headers' => array(
+                              'Accept' => 'application/json',
+                              'X-H2O-Contract' => self::CONTRACT,
+                              'X-H2O-Consumer' => 'h2o-ia-site-migrator',
+                          ),
+                      )
+                  );
+
+                  if ( is_wp_error( $response ) ) {
+                      return $response;
+                  }
+
+                  $status = (int) wp_remote_retrieve_response_code( $response );
+                  if ( 404 === $status ) {
+                      return new \WP_Error(
+                          'h2osm_whatsapp_contract_missing',
+                          'Funnels 2.8.3 o superior todavía no publica el contrato administrativo de WhatsApp.'
+                      );
+                  }
+                  if ( 200 !== $status ) {
+                      return new \WP_Error(
+                          'h2osm_whatsapp_capabilities_http',
+                          'No fue posible consultar las capacidades administrativas de Funnels.',
+                          array( 'status' => $status )
+                      );
+                  }
+
+                  $payload = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+                  if (
+                      ! is_array( $payload ) ||
+                      true !== ( $payload['ok'] ?? false ) ||
+                      self::CONTRACT !== (string) ( $payload['contract'] ?? '' )
+                  ) {
+                      return new \WP_Error( 'h2osm_whatsapp_contract_invalid', 'Contrato administrativo de Funnels inválido.' );
+                  }
+
+                  $version = sanitize_text_field( (string) ( $payload['component_version'] ?? '' ) );
+                  if ( '' === $version || version_compare( $version, self::REQUIRED_FUNNELS_VERSION, '<' ) ) {
+                      return new \WP_Error(
+                          'h2osm_whatsapp_funnels_update_required',
+                          'WhatsApp automático requiere h2o Funnels MktDigital 2.8.3 o superior.',
+                          array( 'installed' => $version, 'required' => self::REQUIRED_FUNNELS_VERSION )
+                      );
+                  }
+
+                  $caps = array_map( 'strval', (array) ( $payload['capabilities'] ?? array() ) );
+                  if ( ! in_array( 'whatsapp_contextual.configure', $caps, true ) ) {
+                      return new \WP_Error( 'h2osm_whatsapp_capability_missing', 'Funnels no habilita la configuración pública de WhatsApp.' );
+                  }
+
+                  return $payload;
+              }
+
+              public static function detect_public_phone(): array|\WP_Error {
+                  $urls = self::seed_urls();
+                  $candidates = array();
+                  $seen = array();
+
+                  while ( ! empty( $urls ) && count( $seen ) < self::MAX_SCAN_URLS ) {
+                      $url = array_shift( $urls );
+                      $url = esc_url_raw( (string) $url, array( 'http', 'https' ) );
+                      if ( '' === $url || isset( $seen[ $url ] ) || ! self::same_origin( $url ) ) {
+                          continue;
+                      }
+                      $seen[ $url ] = true;
+
+                      $response = wp_safe_remote_get(
+                          $url,
+                          array(
+                              'timeout' => self::TIMEOUT,
+                              'redirection' => 1,
+                              'headers' => array( 'Accept' => 'text/html,application/xhtml+xml' ),
+                          )
+                      );
+                      if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+                          continue;
+                      }
+
+                      $html = substr( (string) wp_remote_retrieve_body( $response ), 0, self::MAX_BODY_BYTES );
+                      if ( '' === trim( $html ) ) {
+                          continue;
+                      }
+
+                      foreach ( self::extract_candidates( $html, $url ) as $candidate ) {
+                          $phone = (string) $candidate['phone'];
+                          if ( ! isset( $candidates[ $phone ] ) || (int) $candidate['confidence'] > (int) $candidates[ $phone ]['confidence'] ) {
+                              $candidates[ $phone ] = $candidate;
+                          }
+                      }
+
+                      foreach ( self::discover_relevant_links( $html, $url ) as $link ) {
+                          if ( count( $urls ) + count( $seen ) >= self::MAX_SCAN_URLS ) {
+                              break;
+                          }
+                          if ( ! isset( $seen[ $link ] ) && ! in_array( $link, $urls, true ) ) {
+                              $urls[] = $link;
+                          }
+                      }
+                  }
+
+                  if ( empty( $candidates ) ) {
+                      return new \WP_Error(
+                          'h2osm_whatsapp_phone_not_found',
+                          'No se encontró un teléfono WhatsApp inequívoco en el sitio público.'
+                      );
+                  }
+
+                  usort(
+                      $candidates,
+                      static function ( array $a, array $b ): int {
+                          $by_score = (int) $b['confidence'] <=> (int) $a['confidence'];
+                          return 0 !== $by_score ? $by_score : strcmp( (string) $a['phone'], (string) $b['phone'] );
+                      }
+                  );
+
+                  $top = $candidates[0];
+                  if ( (int) $top['confidence'] < self::MIN_CONFIDENCE ) {
+                      return new \WP_Error(
+                          'h2osm_whatsapp_phone_low_confidence',
+                          'Se encontraron teléfonos, pero ninguno está identificado con suficiente certeza como WhatsApp.',
+                          array( 'best_confidence' => (int) $top['confidence'] )
+                      );
+                  }
+
+                  if (
+                      isset( $candidates[1] ) &&
+                      (string) $candidates[1]['phone'] !== (string) $top['phone'] &&
+                      (int) $candidates[1]['confidence'] >= (int) $top['confidence'] - 5
+                  ) {
+                      return new \WP_Error(
+                          'h2osm_whatsapp_phone_ambiguous',
+                          'Hay más de un teléfono WhatsApp plausible; no se activará ninguno automáticamente.',
+                          array(
+                              'candidates' => array(
+                                  array( 'phone' => (string) $top['phone'], 'confidence' => (int) $top['confidence'] ),
+                                  array( 'phone' => (string) $candidates[1]['phone'], 'confidence' => (int) $candidates[1]['confidence'] ),
+                              ),
+                          )
+                      );
+                  }
+
+                  return $top;
+              }
+
+              private static function seed_urls(): array {
+                  return array_values(
+                      array_unique(
+                          array(
+                              home_url( '/' ),
+                              home_url( '/contacto/' ),
+                              home_url( '/contact/' ),
+                              home_url( '/contactanos/' ),
+                              home_url( '/contact-us/' ),
+                          )
+                      )
+                  );
+              }
+
+              private static function discover_relevant_links( string $html, string $source_url ): array {
+                  $links = array();
+                  if ( ! preg_match_all( '/<a\\b([^>]*)>(.*?)<\\/a>/is', $html, $matches, PREG_SET_ORDER ) ) {
+                      return $links;
+                  }
+
+                  foreach ( $matches as $match ) {
+                      $attrs = (string) $match[1];
+                      if ( ! preg_match( '/\\bhref\\s*=\\s*(["\\\'])(.*?)\\1/is', $attrs, $href_match ) ) {
+                          continue;
+                      }
+                      $href = html_entity_decode( trim( (string) $href_match[2] ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                      $label = strtolower( trim( wp_strip_all_tags( (string) $match[2] ) . ' ' . $attrs . ' ' . $href ) );
+                      if ( ! preg_match( '/contact|contacto|contactanos|whatsapp|cotiza|cotizar/i', $label ) ) {
+                          continue;
+                      }
+                      $absolute = self::absolute_url( $href, $source_url );
+                      if ( '' !== $absolute && self::same_origin( $absolute ) ) {
+                          $links[] = $absolute;
+                      }
+                  }
+
+                  return array_values( array_unique( $links ) );
+              }
+
+              private static function extract_candidates( string $html, string $source_url ): array {
+                  $out = array();
+
+                  if ( preg_match_all( '/<a\\b([^>]*)>(.*?)<\\/a>/is', $html, $matches, PREG_SET_ORDER ) ) {
+                      foreach ( $matches as $match ) {
+                          $attrs = (string) $match[1];
+                          if ( ! preg_match( '/\\bhref\\s*=\\s*(["\\\'])(.*?)\\1/is', $attrs, $href_match ) ) {
+                              continue;
+                          }
+
+                          $href = html_entity_decode( trim( (string) $href_match[2] ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                          $context = strtolower( wp_strip_all_tags( (string) $match[2] ) . ' ' . $attrs );
+                          $candidate = self::candidate_from_href( $href, $context, $source_url );
+                          if ( is_array( $candidate ) ) {
+                              $out[] = $candidate;
+                          }
+                      }
+                  }
+
+                  $plain = html_entity_decode( wp_strip_all_tags( $html ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                  if ( preg_match_all(
+                      '/(?:whatsapp.{0,180}?(\\+[0-9][0-9\\s().-]{7,24})|(\\+[0-9][0-9\\s().-]{7,24}).{0,180}?whatsapp)/is',
+                      $plain,
+                      $nearby,
+                      PREG_SET_ORDER
+                  ) ) {
+                      foreach ( $nearby as $match ) {
+                          $raw = '' !== (string) ( $match[1] ?? '' ) ? (string) $match[1] : (string) ( $match[2] ?? '' );
+                          $phone = self::normalize_phone( $raw );
+                          if ( '' !== $phone ) {
+                              $out[] = array(
+                                  'phone' => $phone,
+                                  'confidence' => 90,
+                                  'evidence_type' => 'whatsapp_text_near_international_phone',
+                                  'source_url' => $source_url,
+                              );
+                          }
+                      }
+                  }
+
+                  return $out;
+              }
+
+              private static function candidate_from_href( string $href, string $context, string $source_url ): ?array {
+                  $decoded = html_entity_decode( trim( $href ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                  $lower = strtolower( $decoded );
+
+                  if ( preg_match( '#(?:https?:)?//wa\\.me/([+0-9().%\\- ]{8,40})#i', $decoded, $m ) ) {
+                      $phone = self::normalize_phone( rawurldecode( (string) $m[1] ) );
+                      return '' !== $phone ? self::candidate( $phone, 100, 'wa_me', $source_url ) : null;
+                  }
+
+                  if (
+                      str_contains( $lower, 'whatsapp.com' ) ||
+                      str_starts_with( $lower, 'whatsapp://')
+                  ) {
+                      if ( preg_match( '/(?:[?&]phone=)([^&#]+)/i', $decoded, $m ) ) {
+                          $phone = self::normalize_phone( rawurldecode( (string) $m[1] ) );
+                          return '' !== $phone ? self::candidate( $phone, 100, 'whatsapp_phone_parameter', $source_url ) : null;
+                      }
+                  }
+
+                  if ( str_starts_with( $lower, 'tel:' ) ) {
+                      $phone = self::normalize_phone( substr( $decoded, 4 ) );
+                      if ( '' === $phone ) {
+                          return null;
+                      }
+                      if ( str_contains( $context, 'whatsapp' ) ) {
+                          return self::candidate( $phone, 95, 'whatsapp_label_tel', $source_url );
+                      }
+                      return self::candidate( $phone, 55, 'generic_tel', $source_url );
+                  }
+
+                  if ( str_contains( $context, 'whatsapp' ) ) {
+                      if ( preg_match( '/(\\+[0-9][0-9\\s().-]{7,24})/', $decoded . ' ' . $context, $m ) ) {
+                          $phone = self::normalize_phone( (string) $m[1] );
+                          return '' !== $phone ? self::candidate( $phone, 90, 'whatsapp_anchor_international_phone', $source_url ) : null;
+                      }
+                  }
+
+                  return null;
+              }
+
+              private static function candidate( string $phone, int $confidence, string $type, string $url ): array {
+                  return array(
+                      'phone' => $phone,
+                      'confidence' => max( 0, min( 100, $confidence ) ),
+                      'evidence_type' => sanitize_key( $type ),
+                      'source_url' => esc_url_raw( $url ),
+                  );
+              }
+
+              private static function normalize_phone( string $raw ): string {
+                  $phone = preg_replace( '/\\D+/', '', $raw ) ?: '';
+                  if ( str_starts_with( $phone, '00' ) ) {
+                      $phone = substr( $phone, 2 );
+                  }
+                  return strlen( $phone ) >= 8 && strlen( $phone ) <= 15 ? $phone : '';
+              }
+
+              private static function configure_whatsapp( array $detected ): array|\WP_Error {
+                  $route = '/' . self::NAMESPACE . '/whatsapp-contextual';
+                  $url = rest_url( self::NAMESPACE . '/whatsapp-contextual' );
+
+                  if ( ! self::same_origin( $url ) ) {
+                      return new \WP_Error( 'h2osm_whatsapp_origin_rejected', 'Origen administrativo de Funnels no permitido.' );
+                  }
+
+                  $payload = array(
+                      'phone' => (string) $detected['phone'],
+                      'enabled' => true,
+                      'sitewide' => true,
+                      'confidence' => (int) $detected['confidence'],
+                      'source' => array(
+                          'evidence_type' => (string) $detected['evidence_type'],
+                          'url' => (string) $detected['source_url'],
+                      ),
+                  );
+
+                  $body = wp_json_encode( $payload, JSON_UNESCAPED_SLASHES );
+                  if ( ! is_string( $body ) ) {
+                      return new \WP_Error( 'h2osm_whatsapp_encode_failed', 'No fue posible preparar la configuración de WhatsApp.' );
+                  }
+
+                  $timestamp = (string) time();
+                  try {
+                      $nonce = bin2hex( random_bytes( 16 ) );
+                  } catch ( \Throwable $e ) {
+                      return new \WP_Error( 'h2osm_whatsapp_nonce_failed', 'No fue posible generar el nonce de seguridad.' );
+                  }
+
+                  $idempotency = 'h2osm:whatsapp:' . substr(
+                      hash( 'sha256', self::normalize_host( (string) wp_parse_url( home_url( '/' ), PHP_URL_HOST ) ) . '|' . $detected['phone'] ),
+                      0,
+                      32
+                  );
+                  $canonical = implode(
+                      "\n",
+                      array(
+                          'POST',
+                          $route,
+                          $timestamp,
+                          $nonce,
+                          $idempotency,
+                          hash( 'sha256', $body ),
+                      )
+                  );
+                  $secret = hash_hmac( 'sha256', 'h2o-site-local-hmac-v1', wp_salt( 'auth' ) );
+
+                  $response = wp_safe_remote_post(
+                      $url,
+                      array(
+                          'timeout' => self::TIMEOUT,
+                          'redirection' => 0,
+                          'headers' => array(
+                              'Accept' => 'application/json',
+                              'Content-Type' => 'application/json',
+                              'X-H2O-Contract' => self::CONTRACT,
+                              'X-H2O-Consumer' => 'h2o-ia-site-migrator',
+                              'X-H2O-Key-Id' => 'site-local-v1',
+                              'X-H2O-Timestamp' => $timestamp,
+                              'X-H2O-Nonce' => $nonce,
+                              'Idempotency-Key' => $idempotency,
+                              'X-H2O-Signature' => 'v1=' . hash_hmac( 'sha256', $canonical, $secret ),
+                          ),
+                          'body' => $body,
+                      )
+                  );
+
+                  if ( is_wp_error( $response ) ) {
+                      return $response;
+                  }
+
+                  $status = (int) wp_remote_retrieve_response_code( $response );
+                  $data = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+                  if ( $status < 200 || $status >= 300 || ! is_array( $data ) ) {
+                      return new \WP_Error(
+                          'h2osm_whatsapp_configuration_http',
+                          'Funnels rechazó la configuración automática de WhatsApp.',
+                          array( 'status' => $status )
+                      );
+                  }
+
+                  if ( true !== ( $data['ok'] ?? false ) || self::CONTRACT !== (string) ( $data['contract'] ?? '' ) ) {
+                      return new \WP_Error( 'h2osm_whatsapp_configuration_invalid', 'Funnels devolvió una respuesta administrativa inválida.' );
+                  }
+
+                  return $data;
+              }
+
+              private static function absolute_url( string $href, string $source_url ): string {
+                  $href = trim( $href );
+                  if ( '' === $href || str_starts_with( $href, '#' ) || str_starts_with( strtolower( $href ), 'javascript:' ) ) {
+                      return '';
+                  }
+                  if ( preg_match( '#^https?://#i', $href ) ) {
+                      return esc_url_raw( $href, array( 'http', 'https' ) );
+                  }
+                  if ( str_starts_with( $href, '//' ) ) {
+                      $scheme = (string) wp_parse_url( $source_url, PHP_URL_SCHEME );
+                      return esc_url_raw( ( $scheme ?: 'https' ) . ':' . $href, array( 'http', 'https' ) );
+                  }
+
+                  $scheme = (string) wp_parse_url( $source_url, PHP_URL_SCHEME );
+                  $host = (string) wp_parse_url( $source_url, PHP_URL_HOST );
+                  $port = wp_parse_url( $source_url, PHP_URL_PORT );
+                  $origin = ( $scheme ?: 'https' ) . '://' . $host . ( $port ? ':' . (int) $port : '' );
+
+                  if ( str_starts_with( $href, '/' ) ) {
+                      return esc_url_raw( $origin . $href, array( 'http', 'https' ) );
+                  }
+
+                  $path = (string) wp_parse_url( $source_url, PHP_URL_PATH );
+                  $base = preg_replace( '#/[^/]*$#', '/', $path ?: '/' );
+                  return esc_url_raw( $origin . $base . $href, array( 'http', 'https' ) );
+              }
+
+              private static function same_origin( string $url ): bool {
+                  $home = self::normalize_host( (string) wp_parse_url( home_url( '/' ), PHP_URL_HOST ) );
+                  $host = self::normalize_host( (string) wp_parse_url( $url, PHP_URL_HOST ) );
+                  return '' !== $home && $home === $host;
+              }
+
+              private static function normalize_host( string $host ): string {
+                  $host = strtolower( trim( $host ) );
+                  return str_starts_with( $host, 'www.' ) ? substr( $host, 4 ) : $host;
+              }
+
+              private static function record_state( string $status, array $details ): void {
+                  update_option(
+                      self::STATE_OPTION,
+                      array_merge(
+                          array(
+                              'status' => sanitize_key( $status ),
+                              'updated_at' => time(),
+                              'contract' => self::CONTRACT,
+                          ),
+                          $details
+                      ),
+                      false
+                  );
+              }
+          }
+          PHP
+
+          python3 - "$ROOT" "$BASE_VERSION" "$VERSION" <<'PY'
+          import pathlib, re, sys
+          root=pathlib.Path(sys.argv[1]); base=sys.argv[2]; version=sys.argv[3]
+
+          main=root/'h2o-ia-site-migrator.php'
+          s=main.read_text()
+          s=re.sub(r'Version:\s*'+re.escape(base),f'Version: {version}',s,count=1)
+          s=s.replace(f"define( 'H2OSM_VERSION', '{base}' )",f"define( 'H2OSM_VERSION', '{version}' )")
+          req="require_once H2OSM_DIR . 'includes/class-whatsapp-onboarding.php';"
+          if req not in s:
+              needle="require_once H2OSM_DIR . 'includes/class-funnels.php';"
+              if needle not in s:
+                  raise SystemExit('FUNNELS_REQUIRE_NOT_FOUND')
+              s=s.replace(needle,needle+"\n"+req,1)
+          call=r"\H2O\Site_Migrator\WhatsApp_Onboarding::register();"
+          if call not in s:
+              s += "\n" + call + "\n"
+          main.write_text(s)
+
+          profile=root/'profiles/templa-design.php'
+          p=profile.read_text()
+          p=p.replace(f'h2o-site-migrator:templa-design:{base}',f'h2o-site-migrator:templa-design:{version}')
+          p=p.replace(f'data-h2osm-release="{base}"',f'data-h2osm-release="{version}"')
+          p=re.sub(r"'version'\s*=>\s*'[^']+'",f"'version' => '{version}'",p,count=1)
+          profile.write_text(p)
+          PY
+
+          php -l "$ROOT/h2o-ia-site-migrator.php" >/dev/null
+          php -l "$ROOT/includes/class-whatsapp-onboarding.php" >/dev/null
+          php -l "$ROOT/includes/class-funnels.php" >/dev/null
+
+          grep -q "Version: $VERSION" "$ROOT/h2o-ia-site-migrator.php"
+          grep -q "h2o.funnels.resources-admin/v1" "$ROOT/includes/class-whatsapp-onboarding.php"
+          grep -q "REQUIRED_FUNNELS_VERSION = '2.8.3'" "$ROOT/includes/class-whatsapp-onboarding.php"
+          grep -q "wa\\.me" "$ROOT/includes/class-whatsapp-onboarding.php"
+          grep -q "wp_safe_remote_post" "$ROOT/includes/class-whatsapp-onboarding.php"
+          ! grep -q "H2OFM_" "$ROOT/includes/class-whatsapp-onboarding.php"
+          ! grep -q "\$wpdb" "$ROOT/includes/class-whatsapp-onboarding.php"
+
+          cat > "$WORK/test-whatsapp-onboarding.php" <<'PHP'
+          <?php
+          define('ABSPATH',__DIR__.'/');
+          define('MINUTE_IN_SECONDS',60);
+          define('HOUR_IN_SECONDS',3600);
+          $GLOBALS['opts']=array();
+          $GLOBALS['transients']=array();
+          $GLOBALS['gets']=array();
+          $GLOBALS['last_post']=null;
+
+          function add_action(...$x){}
+          function current_user_can($c){return true;}
+          function get_option($k,$d=false){return array_key_exists($k,$GLOBALS['opts'])?$GLOBALS['opts'][$k]:$d;}
+          function update_option($k,$v,$autoload=null){$GLOBALS['opts'][$k]=$v;return true;}
+          function get_transient($k){return $GLOBALS['transients'][$k]??false;}
+          function set_transient($k,$v,$ttl){$GLOBALS['transients'][$k]=$v;return true;}
+          function delete_transient($k){unset($GLOBALS['transients'][$k]);return true;}
+          function home_url($p='/'){return 'https://templadesign.cl'.('/'===substr($p,0,1)?$p:'/'.$p);}
+          function rest_url($p=''){return 'https://templadesign.cl/wp-json/'.ltrim($p,'/');}
+          function wp_parse_url($u,$component=-1){return parse_url($u,$component);}
+          function esc_url_raw($u,$schemes=null){return (string)$u;}
+          function sanitize_text_field($v){return trim(strip_tags((string)$v));}
+          function sanitize_key($v){return strtolower(preg_replace('/[^a-z0-9_.-]/','',(string)$v));}
+          function wp_strip_all_tags($v){return strip_tags((string)$v);}
+          function wp_json_encode($v,$flags=0){return json_encode($v,$flags);}
+          function wp_salt($scheme='auth'){return 'unit-test-auth-salt';}
+          function is_wp_error($v){return $v instanceof WP_Error;}
+          function wp_remote_retrieve_response_code($r){return $r['code']??0;}
+          function wp_remote_retrieve_body($r){return $r['body']??'';}
+          function wp_safe_remote_get($url,$args=[]){return $GLOBALS['gets'][$url]??array('code'=>404,'body'=>'');}
+          function wp_safe_remote_post($url,$args=[]){
+              $GLOBALS['last_post']=array('url'=>$url,'args'=>$args);
+              $route='/h2o-funnels-mktdigital/resources-admin/v1/whatsapp-contextual';
+              $h=$args['headers']; $body=(string)$args['body'];
+              $canonical=implode("\n",array('POST',$route,$h['X-H2O-Timestamp'],$h['X-H2O-Nonce'],$h['Idempotency-Key'],hash('sha256',$body)));
+              $secret=hash_hmac('sha256','h2o-site-local-hmac-v1',wp_salt('auth'));
+              $expected='v1='.hash_hmac('sha256',$canonical,$secret);
+              if(($h['X-H2O-Signature']??'')!==$expected){return array('code'=>401,'body'=>'{}');}
+              $p=json_decode($body,true);
+              return array('code'=>200,'body'=>json_encode(array(
+                  'ok'=>true,'contract'=>'h2o.funnels.resources-admin/v1',
+                  'funnel_uuid'=>'11111111-1111-4111-8111-111111111111',
+                  'enabled'=>true,'sitewide'=>true,'phone'=>$p['phone'],
+                  'preserved_manual'=>false
+              )));
+          }
+          class WP_Error{
+              private $code; private $msg; private $data;
+              function __construct($c,$m='',$d=null){$this->code=$c;$this->msg=$m;$this->data=$d;}
+              function get_error_code(){return $this->code;}
+              function get_error_message(){return $this->msg;}
+              function get_error_data(){return $this->data;}
+          }
+
+          require getenv('H2OSM_ROOT').'/includes/class-whatsapp-onboarding.php';
+
+          $cap='https://templadesign.cl/wp-json/h2o-funnels-mktdigital/resources-admin/v1/capabilities';
+          $GLOBALS['gets'][$cap]=array('code'=>200,'body'=>json_encode(array(
+              'ok'=>true,'contract'=>'h2o.funnels.resources-admin/v1','component_version'=>'2.8.3',
+              'capabilities'=>array('whatsapp_contextual.configure','whatsapp_contextual.read','manual_configuration_preservation')
+          )));
+          $GLOBALS['gets']['https://templadesign.cl/']=array('code'=>200,'body'=>'<html><body><a href="/contacto/">Contacto</a><a href="tel:+56 2 2000 0000">Teléfono oficina</a></body></html>');
+          $GLOBALS['gets']['https://templadesign.cl/contacto/']=array('code'=>200,'body'=>'<a aria-label="WhatsApp" href="https://wa.me/56952561977">Escribir por WhatsApp</a>');
+          $GLOBALS['gets']['https://templadesign.cl/contact/']=array('code'=>404,'body'=>'');
+          $GLOBALS['gets']['https://templadesign.cl/contactanos/']=array('code'=>404,'body'=>'');
+          $GLOBALS['gets']['https://templadesign.cl/contact-us/']=array('code'=>404,'body'=>'');
+
+          $det=\H2O\Site_Migrator\WhatsApp_Onboarding::detect_public_phone();
+          if(is_wp_error($det)||$det['phone']!=='56952561977'||$det['confidence']!==100||$det['evidence_type']!=='wa_me'){
+              fwrite(STDERR,"DETECTION_FAIL\n");var_export($det);exit(1);
+          }
+
+          \H2O\Site_Migrator\WhatsApp_Onboarding::maybe_run();
+          $state=$GLOBALS['opts']['h2osm_whatsapp_onboarding_v1']??array();
+          if(($state['status']??'')!=='configured'||($state['phone']??'')!=='56952561977'||empty($state['sitewide'])){
+              fwrite(STDERR,"ONBOARDING_FAIL\n");var_export($state);exit(1);
+          }
+          if(($GLOBALS['last_post']['args']['headers']['X-H2O-Contract']??'')!=='h2o.funnels.resources-admin/v1'){
+              fwrite(STDERR,"CONTRACT_HEADER_FAIL\n");exit(1);
+          }
+
+          // Ambiguity guard: two equally strong WhatsApp numbers must fail closed.
+          $GLOBALS['opts']=array(); $GLOBALS['transients']=array();
+          $GLOBALS['gets']['https://templadesign.cl/']=array('code'=>200,'body'=>'<a href="https://wa.me/56911111111">WhatsApp ventas</a><a href="https://wa.me/56922222222">WhatsApp soporte</a>');
+          $GLOBALS['gets']['https://templadesign.cl/contacto/']=array('code'=>404,'body'=>'');
+          $amb=\H2O\Site_Migrator\WhatsApp_Onboarding::detect_public_phone();
+          if(!is_wp_error($amb)||$amb->get_error_code()!=='h2osm_whatsapp_phone_ambiguous'){
+              fwrite(STDERR,"AMBIGUITY_GUARD_FAIL\n");exit(1);
+          }
+
+          echo "SITE_MIGRATOR_1019_WHATSAPP_ONBOARDING_OK\n";
+          PHP
+
+          H2OSM_ROOT="$ROOT" php "$WORK/test-whatsapp-onboarding.php"
+
+          {
+            echo "## $VERSION — 2026-10-06"
+            echo "- Regla base: después de instalar Funnels, Site Migrator intenta habilitar WhatsApp contextual automáticamente."
+            echo "- Descubre el teléfono exclusivamente desde el sitio público por HTTP; wa.me y enlaces WhatsApp tienen prioridad."
+            echo "- No inventa código de país y falla cerrado si hay dos números WhatsApp igualmente plausibles."
+            echo "- Configura Funnels únicamente mediante h2o.funnels.resources-admin/v1 firmado con HMAC-SHA256."
+            echo "- Activa WhatsApp sitewide y conserva cualquier configuración manual existente."
+            echo "- No usa WPVibe ni internals de Funnels."
+            echo
+            cat "$ROOT/CHANGELOG.md"
+          } > "$WORK/CHANGELOG.md"
+          mv "$WORK/CHANGELOG.md" "$ROOT/CHANGELOG.md"
+
+          (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
+          SHA="$(sha256sum "$DIST/h2o-ia-site-migrator-$VERSION.zip" | awk '{print $1}')"
+          echo "$SHA" > "$DIST/package.sha256"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          base64 -w0 "$DIST/h2o-ia-site-migrator-$VERSION.zip" > "$DIST/package.b64"
+          split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/raw-"
+
+          python3 - "$VERSION" "$SHA" "$DIST" <<'PY'
+          import json,pathlib,sys
+          version,sha,dist=sys.argv[1],sys.argv[2],pathlib.Path(sys.argv[3])
+          raw=sorted((dist/'parts').glob('raw-*'))
+          parts=[f'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/{version}/part-{i:02d}.b64' for i in range(1,len(raw)+1)]
+          bootstrap={'version':version,'package_id':'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256','package_sha256':sha,'parts':parts,'tested':'7.1','requires_php':'8.0'}
+          release={'version':version,'package_url':f'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v{version}/h2o-ia-site-migrator-{version}.zip','package_sha256':sha,'tested':'7.1','requires_php':'8.0'}
+          (dist/'release-bootstrap.json').write_text(json.dumps(bootstrap,indent=2)+'\n')
+          (dist/'release.json').write_text(json.dumps(release,indent=2)+'\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h2o-ia-site-migrator-1.0.19-tested
+          path: |
+            dist-1019/h2o-ia-site-migrator-1.0.19.zip
+            dist-1019/release.json
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          PACKAGE="dist-1019/h2o-ia-site-migrator-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PACKAGE" dist-1019/release.json --clobber
+          else
+            gh release create "$TAG" "$PACKAGE" dist-1019/release.json \
+              --target main \
+              --title "h2o IA Site Migrator $VERSION" \
+              --notes "Regla base de migración: detectar WhatsApp en el sitio público y activar el Funnel WhatsApp contextual vía contrato HTTP firmado, sin WPVibe ni internals."
+          fi
+
+      - name: Publish updater chunks and manifest
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          put_file () {
+            path="$1"; file="$2"; msg="$3"
+            encoded="$(base64 -w0 "$file")"
+            sha="$(gh api "repos/$REPO/contents/$path?ref=main" --jq '.sha' 2>/dev/null || true)"
+            if [ -n "$sha" ]; then
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f sha="$sha" -f branch="main" >/dev/null
+            else
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f branch="main" >/dev/null
+            fi
+          }
+          i=1
+          for f in $(find dist-1019/parts -type f -name 'raw-*' | sort); do
+            target="$(printf 'bootstrap/%s/part-%02d.b64' "$VERSION" "$i")"
+            put_file "$target" "$f" "Site Migrator $VERSION package part $i"
+            i=$((i+1))
+          done
+          put_file "bootstrap/package.sha256" "dist-1019/package.sha256" "Site Migrator $VERSION checksum"
+          put_file "bootstrap/release.json" "dist-1019/release-bootstrap.json" "Publish Site Migrator $VERSION updater manifest"
