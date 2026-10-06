@@ -21,5 +21,7 @@ jobs:
           ROOT="$WORK/pkg/h2o-ia-site-migrator"
           echo "=== funnels references ==="
           grep -RniE "Funnels|funnels|funnel_uuid|No fue posible consultar" "$ROOT" | head -n 300 || true
+          echo "=== class-funnels.php ==="
+          sed -n '1,260p' "$ROOT/includes/class-funnels.php"
           echo "=== files ==="
           find "$ROOT" -maxdepth 3 -type f | sort
