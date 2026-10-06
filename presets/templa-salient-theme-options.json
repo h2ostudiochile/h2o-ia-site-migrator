@@ -1,0 +1,355 @@
+{
+  "preset_id": "templa-design-salient-visual-v1",
+  "site": "templadesign.cl",
+  "target": "Salient Theme Options",
+  "mode": "operator_preset_only",
+  "architecture": {
+    "runtime_theme_mutation": false,
+    "note": "El Site Migrator no escribe salient_redux ni internals del tema. Este preset se aplica como configuración administrativa de Salient por un operador/conector autorizado."
+  },
+  "design_intent": "Minimalista, editorial, arquitectura/interiorismo, Apple/Shopify",
+  "palette": {
+    "accent_color": "#FFC300",
+    "extra_color_1": "#2E2B24",
+    "extra_color_2": "#FDFAF3",
+    "extra_color_3": null,
+    "gradient_1": null,
+    "gradient_2": null,
+    "overall_font_color": "#2E2B24"
+  },
+  "header_navigation": {
+    "logo_height": 62,
+    "mobile_logo_height": 42,
+    "header_padding": 18,
+    "menu_item_spacing": 16,
+    "header_box_shadow": "none",
+    "header_hover_effect": {
+      "value": "default",
+      "label": "Color Change",
+      "forbidden_values": [
+        "animated_underline"
+      ],
+      "alternatives_allowed": [
+        "button_bg",
+        "text_reveal"
+      ]
+    }
+  },
+  "font_loading": {
+    "family": "Manrope",
+    "default_theme_font_functionality": "remove",
+    "load_google_fonts_locally": true,
+    "weights": [
+      400,
+      500,
+      600,
+      700
+    ],
+    "italic_weights": [
+      400
+    ]
+  },
+  "typography": {
+    "navigation_page_header": {
+      "logo_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "1rem",
+        "line_height": "1",
+        "letter_spacing": "-0.01em",
+        "transform": "none"
+      },
+      "navigation_font_family": {
+        "family": "Manrope",
+        "weight": 500,
+        "size": "0.925rem",
+        "line_height": "1",
+        "letter_spacing": "0.015em",
+        "transform": "none"
+      },
+      "navigation_dropdown_font_family": {
+        "family": "Manrope",
+        "weight": 500,
+        "size": "0.875rem",
+        "line_height": "1.4",
+        "letter_spacing": "0.01em",
+        "transform": "none"
+      },
+      "page_heading_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "4rem",
+        "line_height": "1.05",
+        "letter_spacing": "-0.04em",
+        "transform": "none"
+      },
+      "page_heading_subtitle_font_family": {
+        "family": "Manrope",
+        "weight": 400,
+        "size": "1.125rem",
+        "line_height": "1.5",
+        "letter_spacing": "-0.01em",
+        "transform": "none"
+      },
+      "off_canvas_nav_font_family": {
+        "family": "Manrope",
+        "weight": 500,
+        "size": "2.75rem",
+        "line_height": "1.05",
+        "letter_spacing": "-0.035em",
+        "transform": "none"
+      },
+      "off_canvas_nav_subtext_font_family": {
+        "family": "Manrope",
+        "weight": 400,
+        "size": "0.9375rem",
+        "line_height": "1.5",
+        "letter_spacing": "0em",
+        "transform": "none"
+      }
+    },
+    "general_html_elements": {
+      "body_font_family": {
+        "family": "Manrope",
+        "weight": 400,
+        "size": "1rem",
+        "line_height": "1.65",
+        "letter_spacing": "0em",
+        "transform": "none"
+      },
+      "h1_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "4rem",
+        "line_height": "1.04",
+        "letter_spacing": "-0.04em",
+        "transform": "none"
+      },
+      "h2_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "3rem",
+        "line_height": "1.08",
+        "letter_spacing": "-0.035em",
+        "transform": "none"
+      },
+      "h3_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "2.25rem",
+        "line_height": "1.12",
+        "letter_spacing": "-0.025em",
+        "transform": "none"
+      },
+      "h4_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "1.75rem",
+        "line_height": "1.18",
+        "letter_spacing": "-0.02em",
+        "transform": "none"
+      },
+      "h5_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "1.25rem",
+        "line_height": "1.3",
+        "letter_spacing": "-0.01em",
+        "transform": "none"
+      },
+      "h6_font_family": {
+        "family": "Manrope",
+        "weight": 700,
+        "size": "0.875rem",
+        "line_height": "1.3",
+        "letter_spacing": "0.08em",
+        "transform": "uppercase"
+      },
+      "i_font_family": {
+        "family": "Manrope",
+        "weight": "400italic",
+        "size": "1rem",
+        "line_height": "1.65",
+        "letter_spacing": "0em",
+        "transform": "none"
+      },
+      "bold_font_family": {
+        "family": "Manrope",
+        "weight": 600
+      },
+      "label_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "0.8125rem",
+        "line_height": "1.2",
+        "letter_spacing": "0.02em",
+        "transform": "none"
+      }
+    },
+    "salient_elements_areas": {
+      "sidebar_footer_h_font_family": {
+        "label": "Nectar Button",
+        "family": "Manrope",
+        "weight": 600,
+        "size": "0.875rem",
+        "line_height": "1",
+        "letter_spacing": "0.025em",
+        "transform": "none"
+      },
+      "nectar_sidebar_footer_headers_font_family": {
+        "label": "Sidebar/Footer Headers",
+        "family": "Manrope",
+        "weight": 600,
+        "size": "0.875rem",
+        "line_height": "1.25",
+        "letter_spacing": "0.04em",
+        "transform": "uppercase"
+      },
+      "nectar_slider_heading_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "4.25rem",
+        "line_height": "1.03",
+        "letter_spacing": "-0.04em",
+        "transform": "none"
+      },
+      "home_slider_caption_font_family": {
+        "family": "Manrope",
+        "weight": 400,
+        "size": "1.125rem",
+        "line_height": "1.5",
+        "letter_spacing": "0em",
+        "transform": "none"
+      },
+      "testimonial_font_family": {
+        "family": "Manrope",
+        "weight": 500,
+        "size": "1.75rem",
+        "line_height": "1.4",
+        "letter_spacing": "-0.02em",
+        "transform": "none"
+      },
+      "blog_single_post_content_font_family": {
+        "family": "Manrope",
+        "weight": 400,
+        "size": "1.0625rem",
+        "line_height": "1.72",
+        "letter_spacing": "0em",
+        "transform": "none"
+      },
+      "portfolio_filters_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "0.8125rem",
+        "line_height": "1.2",
+        "letter_spacing": "0.05em",
+        "transform": "uppercase"
+      },
+      "portfolio_caption_font_family": {
+        "family": "Manrope",
+        "weight": 400,
+        "size": "0.9375rem",
+        "line_height": "1.5",
+        "letter_spacing": "0em",
+        "transform": "none"
+      },
+      "team_member_h_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "0.875rem",
+        "line_height": "1.25",
+        "letter_spacing": "0.04em",
+        "transform": "none"
+      },
+      "nectar_dropcap_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "4rem",
+        "line_height": "0.9",
+        "letter_spacing": "-0.04em",
+        "transform": "none"
+      },
+      "nectar_woo_shop_product_title_font_family": {
+        "family": "Manrope",
+        "weight": 600,
+        "size": "1.125rem",
+        "line_height": "1.3",
+        "letter_spacing": "-0.015em",
+        "transform": "none"
+      },
+      "nectar_woo_shop_product_secondary_font_family": {
+        "family": "Manrope",
+        "weight": 400,
+        "size": "0.875rem",
+        "line_height": "1.4",
+        "letter_spacing": "0em",
+        "transform": "none"
+      }
+    },
+    "responsive_settings": {
+      "strategy": "fluid_typography",
+      "desktop": {
+        "min": "1rem",
+        "max": "1.08rem",
+        "custom": "calc(0.45vw + 0.55rem)"
+      },
+      "mobile": {
+        "min": "1rem",
+        "max": "1.05rem",
+        "custom": "calc(0.3vw + 0.94rem)"
+      },
+      "legacy_breakpoint_fallback": {
+        "h1": [
+          85,
+          72,
+          60
+        ],
+        "h2": [
+          90,
+          80,
+          68
+        ],
+        "h3": [
+          95,
+          85,
+          75
+        ],
+        "h4": [
+          100,
+          90,
+          85
+        ],
+        "h5": [
+          100,
+          95,
+          95
+        ],
+        "h6": [
+          100,
+          100,
+          100
+        ],
+        "body": [
+          100,
+          100,
+          100
+        ],
+        "blockquote": [
+          95,
+          90,
+          85
+        ]
+      }
+    },
+    "spacing": {
+      "heading_bottom_spacing": "0.55em",
+      "paragraph_bottom_spacing": "1.25em"
+    }
+  },
+  "constraints": [
+    "Never use Animated Underline",
+    "Do not add CSS to simulate Theme Options",
+    "Do not hardcode body font size in WPBakery content",
+    "Do not write salient_redux from Site Migrator runtime"
+  ]
+}
