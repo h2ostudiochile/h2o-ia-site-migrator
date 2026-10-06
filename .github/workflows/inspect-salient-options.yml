@@ -1,0 +1,29 @@
+name: Inspect legacy Salient option keys
+
+on:
+  push:
+    branches:
+      - fix/templa-salient-preset-1.0.16
+    paths:
+      - '.github/workflows/inspect-salient-options.yml'
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect 1.0.13 Salient setup keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/h2osm13"
+          mkdir -p "$WORK"
+          cat bootstrap/1.0.13/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/pkg.zip"
+          unzip -q "$WORK/pkg.zip" -d "$WORK/pkg"
+          FILE="$WORK/pkg/h2o-ia-site-migrator/includes/class-salient-setup.php"
+          test -f "$FILE"
+          echo "=== salient_redux keys ==="
+          grep -oE "\$options\['[^']+'\]" "$FILE" | sort -u || true
+          echo "=== configure method ==="
+          sed -n '/function configure/,/^[[:space:]]*}/p' "$FILE" | sed -n '1,260p'
