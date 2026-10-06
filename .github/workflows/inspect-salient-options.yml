@@ -24,7 +24,7 @@ jobs:
           unzip -q "$WORK/pkg.zip" -d "$WORK/pkg"
           FILE="$WORK/pkg/h2o-ia-site-migrator/includes/class-salient-setup.php"
           test -f "$FILE"
-          echo "=== salient_redux keys ==="
-          grep -oE "\$options\['[^']+'\]" "$FILE" | sort -u || true
-          echo "=== configure method ==="
-          sed -n '/function configure/,/^[[:space:]]*}/p' "$FILE" | sed -n '1,260p'
+          echo "=== salient option assignments ==="
+          grep -nF '$options[' "$FILE" || true
+          echo "=== salient setup full file ==="
+          sed -n '1,320p' "$FILE"
