@@ -6,6 +6,7 @@ on:
       - fix/templa-salient-preset-1.0.16
     paths:
       - '.github/workflows/inspect-salient-options.yml'
+      - 'bootstrap/trigger-inspect-salient.txt'
   workflow_dispatch:
 
 jobs:
