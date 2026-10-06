@@ -1,0 +1,601 @@
+name: Test and release h2o IA Site Migrator 1.0.17
+
+on:
+  push:
+    branches:
+      - main
+      - fix/templa-apply-salient-preset-1.0.17
+    paths:
+      - '.github/workflows/release-1.0.17.yml'
+      - 'presets/templa-salient-theme-options.json'
+      - 'bootstrap/trigger-1.0.17.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h2o-ia-site-migrator-1.0.17-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build one-time native Salient preset application
+        shell: bash
+        run: |
+          set -Euo pipefail
+          trap 'rc=$?; echo "FAILED line $LINENO: $BASH_COMMAND"; exit "$rc"' ERR
+
+          BASE_VERSION="1.0.16"
+          VERSION="1.0.17"
+          WORK="$RUNNER_TEMP/h2osm-$VERSION"
+          DIST="$GITHUB_WORKSPACE/dist-1017"
+
+          rm -rf "$WORK" "$DIST"
+          mkdir -p "$WORK/current" "$DIST/parts"
+
+          cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
+          unzip -q "$WORK/current.zip" -d "$WORK/current"
+          ROOT="$WORK/current/h2o-ia-site-migrator"
+
+          cat > "$ROOT/includes/class-salient-preset-applier.php" <<'PHP'
+          <?php
+          namespace H2O\Site_Migrator;
+
+          if ( ! defined( 'ABSPATH' ) ) {
+              exit;
+          }
+
+          /**
+           * Applies the Templa visual system once through Salient's public Redux API.
+           *
+           * No direct read/write of the salient_redux option is allowed here.
+           * The class waits until Salient and Redux are available, writes through
+           * Redux::setOption(), verifies with Redux::getOption(), triggers Salient's
+           * public saved hook, then records completion only in Site Migrator state.
+           */
+          final class Salient_Preset_Applier {
+              private const PRESET_VERSION = '1.0.17';
+              private const REDUX_OPTION = 'salient_redux';
+              private const APPLIED_OPTION = 'h2osm_templa_salient_preset_applied';
+              private const RESULT_OPTION = 'h2osm_templa_salient_preset_result';
+
+              private static $fields = array();
+              private static $errors = array();
+              private static $applied = array();
+
+              public static function register(): void {
+                  add_action( 'admin_init', array( __CLASS__, 'maybe_apply' ), 999 );
+              }
+
+              public static function maybe_apply(): void {
+                  if ( ! current_user_can( 'manage_options' ) ) {
+                      return;
+                  }
+
+                  $already = (string) get_option( self::APPLIED_OPTION, '' );
+                  if ( '' !== $already && version_compare( $already, self::PRESET_VERSION, '>=' ) ) {
+                      return;
+                  }
+
+                  if ( ! self::is_templa_site() || ! self::is_salient_active() ) {
+                      return;
+                  }
+
+                  if ( ! class_exists( '\\Redux' ) || empty( \Redux::$fields[ self::REDUX_OPTION ] ) ) {
+                      return;
+                  }
+
+                  $preset_file = H2OSM_DIR . 'presets/templa-salient-theme-options.json';
+                  if ( ! is_readable( $preset_file ) ) {
+                      self::record_failure( array( 'preset_file_missing' ) );
+                      return;
+                  }
+
+                  $preset = json_decode( (string) file_get_contents( $preset_file ), true );
+                  if ( ! is_array( $preset ) || empty( $preset['typography_styles'] ) ) {
+                      self::record_failure( array( 'preset_invalid' ) );
+                      return;
+                  }
+
+                  self::$fields  = self::index_fields();
+                  self::$errors  = array();
+                  self::$applied = array();
+
+                  self::apply_header_and_palette( $preset );
+                  self::apply_typography( $preset );
+                  self::apply_responsive( $preset );
+                  self::apply_spacing( $preset );
+                  self::apply_font_loading( $preset );
+
+                  if ( ! empty( self::$errors ) ) {
+                      self::record_failure( self::$errors );
+                      return;
+                  }
+
+                  // Salient registers its dynamic CSS generator on this public Redux hook.
+                  do_action( 'redux/options/' . self::REDUX_OPTION . '/saved' );
+
+                  update_option( self::APPLIED_OPTION, self::PRESET_VERSION, false );
+                  update_option(
+                      self::RESULT_OPTION,
+                      array(
+                          'ok'      => true,
+                          'version' => self::PRESET_VERSION,
+                          'applied' => array_values( array_unique( self::$applied ) ),
+                          'time'    => time(),
+                      ),
+                      false
+                  );
+              }
+
+              private static function is_templa_site(): bool {
+                  $host = strtolower( (string) wp_parse_url( home_url( '/' ), PHP_URL_HOST ) );
+                  return in_array( $host, array( 'templadesign.cl', 'www.templadesign.cl' ), true );
+              }
+
+              private static function is_salient_active(): bool {
+                  $theme = wp_get_theme();
+                  $template = strtolower( (string) $theme->get_template() );
+                  $stylesheet = strtolower( (string) $theme->get_stylesheet() );
+                  return 'salient' === $template || 'salient' === $stylesheet;
+              }
+
+              private static function index_fields(): array {
+                  $indexed = array();
+                  foreach ( (array) \Redux::$fields[ self::REDUX_OPTION ] as $field ) {
+                      if ( ! is_array( $field ) || empty( $field['id'] ) ) {
+                          continue;
+                      }
+                      $indexed[ (string) $field['id'] ] = $field;
+                  }
+                  return $indexed;
+              }
+
+              private static function apply_header_and_palette( array $preset ): void {
+                  $header = (array) $preset['header_navigation'];
+                  $palette = (array) $preset['palette'];
+
+                  self::set_required( 'logo-height', (string) $header['logo_height'] );
+                  self::set_optional( 'mobile-logo-height', (string) $header['mobile_logo_height'] );
+                  self::set_optional( 'header-padding', (string) $header['header_padding'] );
+                  self::set_optional( 'header-menu-item-spacing', (int) $header['menu_item_spacing'] );
+                  self::set_optional( 'header-box-shadow', (string) $header['header_box_shadow'] );
+                  self::set_required( 'header-hover-effect', (string) $header['header_hover_effect']['value'] );
+
+                  self::set_required( 'accent-color', (string) $palette['accent_color'] );
+                  self::set_optional( 'extra-color-1', (string) $palette['extra_color_1'] );
+                  self::set_optional( 'extra-color-2', (string) $palette['extra_color_2'] );
+                  self::set_optional( 'overall-font-color', (string) $palette['overall_font_color'] );
+              }
+
+              private static function apply_typography( array $preset ): void {
+                  $styles = (array) $preset['typography_styles'];
+                  $count = 0;
+
+                  foreach ( self::$fields as $id => $field ) {
+                      if ( 'typography' !== (string) ( $field['type'] ?? '' ) ) {
+                          continue;
+                      }
+
+                      $role = self::typography_role( $id, (string) ( $field['title'] ?? '' ) );
+                      $style = isset( $styles[ $role ] ) ? (array) $styles[ $role ] : (array) $styles['body'];
+                      $value = self::typography_value( $style, $field );
+
+                      if ( self::set_value( $id, $value ) ) {
+                          $count++;
+                      }
+                  }
+
+                  if ( $count < 10 ) {
+                      self::$errors[] = 'typography_fields_too_few:' . $count;
+                  }
+              }
+
+              private static function typography_role( string $id, string $title ): string {
+                  $hay = strtolower( $id . ' ' . strip_tags( $title ) );
+
+                  if ( false !== strpos( $hay, 'navigation_dropdown' ) || false !== strpos( $hay, 'navigation dropdown' ) ) return 'navigation_dropdown';
+                  if ( false !== strpos( $hay, 'off_canvas_nav_subtext' ) || false !== strpos( $hay, 'description text' ) ) return 'off_canvas_subtext';
+                  if ( false !== strpos( $hay, 'off_canvas' ) || false !== strpos( $hay, 'off canvas navigation' ) ) return 'off_canvas';
+                  if ( false !== strpos( $hay, 'page_heading_subtitle' ) || false !== strpos( $hay, 'page heading subtitle' ) ) return 'page_heading_subtitle';
+                  if ( false !== strpos( $hay, 'page_heading' ) || false !== strpos( $hay, 'page heading font' ) ) return 'page_heading';
+                  if ( preg_match( '/(^|[_\s])h1([_\s]|$)/', $hay ) ) return 'h1';
+                  if ( preg_match( '/(^|[_\s])h2([_\s]|$)/', $hay ) ) return 'h2';
+                  if ( preg_match( '/(^|[_\s])h3([_\s]|$)/', $hay ) ) return 'h3';
+                  if ( preg_match( '/(^|[_\s])h4([_\s]|$)/', $hay ) ) return 'h4';
+                  if ( preg_match( '/(^|[_\s])h5([_\s]|$)/', $hay ) ) return 'h5';
+                  if ( preg_match( '/(^|[_\s])h6([_\s]|$)/', $hay ) ) return 'h6';
+                  if ( false !== strpos( $hay, 'body_font' ) || false !== strpos( $hay, 'body font' ) ) return 'body';
+                  if ( false !== strpos( $hay, 'italic' ) || 0 === strpos( $id, 'i_font' ) ) return 'italic';
+                  if ( false !== strpos( $hay, 'bold' ) ) return 'bold';
+                  if ( false !== strpos( $hay, 'label' ) ) return 'label';
+                  if ( false !== strpos( $hay, 'nectar button' ) || false !== strpos( $hay, 'sidebar_footer_h_font' ) ) return 'button';
+                  if ( false !== strpos( $hay, 'sidebar/footer headers' ) || false !== strpos( $hay, 'sidebar_footer_headers' ) ) return 'footer_header';
+                  if ( false !== strpos( $hay, 'slider heading' ) ) return 'slider_heading';
+                  if ( false !== strpos( $hay, 'slider caption' ) ) return 'slider_caption';
+                  if ( false !== strpos( $hay, 'testimonial' ) || false !== strpos( $hay, 'blockquote' ) ) return 'testimonial';
+                  if ( false !== strpos( $hay, 'blog single' ) ) return 'article';
+                  if ( false !== strpos( $hay, 'portfolio' ) && false !== strpos( $hay, 'filter' ) ) return 'filter';
+                  if ( false !== strpos( $hay, 'portfolio' ) && ( false !== strpos( $hay, 'caption' ) || false !== strpos( $hay, 'excerpt' ) ) ) return 'small';
+                  if ( false !== strpos( $hay, 'team member' ) || false !== strpos( $hay, 'sub-header' ) ) return 'team';
+                  if ( false !== strpos( $hay, 'dropcap' ) ) return 'dropcap';
+                  if ( false !== strpos( $hay, 'product title' ) ) return 'product_title';
+                  if ( false !== strpos( $hay, 'product secondary' ) ) return 'small';
+                  if ( false !== strpos( $hay, 'navigation_font' ) || false !== strpos( $hay, 'navigation font' ) ) return 'navigation';
+                  if ( false !== strpos( $hay, 'logo_font' ) || false !== strpos( $hay, 'logo font' ) ) return 'logo';
+
+                  return 'body';
+              }
+
+              private static function typography_value( array $style, array $field ): array {
+                  $value = array(
+                      'font-family'    => (string) $style['family'],
+                      'font-weight'    => (string) $style['weight'],
+                      'font-size'      => (string) $style['size'],
+                      'line-height'    => (string) $style['line_height'],
+                      'letter-spacing' => (string) $style['letter_spacing'],
+                      'text-transform' => (string) $style['transform'],
+                  );
+
+                  $supports = array(
+                      'font-size'      => 'font-size',
+                      'line-height'    => 'line-height',
+                      'letter-spacing' => 'letter-spacing',
+                      'text-transform' => 'text-transform',
+                  );
+                  foreach ( $supports as $stored => $definition ) {
+                      if ( isset( $field[ $definition ] ) && false === $field[ $definition ] ) {
+                          unset( $value[ $stored ] );
+                      }
+                  }
+
+                  return $value;
+              }
+
+              private static function apply_responsive( array $preset ): void {
+                  $r = (array) $preset['responsive_settings'];
+                  self::set_optional( 'use-responsive-heading-typography', ! empty( $r['use_custom_responsive_headings'] ) ? '1' : '0' );
+
+                  $groups = array( 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'body', 'blockquote' );
+                  foreach ( $groups as $group ) {
+                      if ( empty( $r[ $group ] ) ) continue;
+                      foreach ( array( 'small_desktop' => 'small-desktop', 'tablet' => 'tablet', 'phone' => 'phone' ) as $source => $slug ) {
+                          if ( ! isset( $r[ $group ][ $source ] ) ) continue;
+                          $id = $group . '-' . $slug . '-font-size';
+                          self::set_optional( $id, (int) $r[ $group ][ $source ] );
+                      }
+                  }
+              }
+
+              private static function apply_spacing( array $preset ): void {
+                  $spacing = (array) $preset['spacing'];
+                  self::set_by_title(
+                      array( 'Heading Bottom Spacing', 'Headings Bottom Spacing' ),
+                      (string) $spacing['heading_bottom_spacing'],
+                      true
+                  );
+                  self::set_by_title(
+                      array( 'Paragraph Bottom Spacing', 'Paragraphs Bottom Spacing' ),
+                      (string) $spacing['paragraph_bottom_spacing'],
+                      true
+                  );
+              }
+
+              private static function apply_font_loading( array $preset ): void {
+                  $loading = (array) $preset['font_loading'];
+                  self::set_optional( 'default-theme-font', (string) $loading['default_theme_font_functionality'] );
+                  self::set_by_title(
+                      array( 'Load Google Fonts Locally', 'Load Google Fonts Local', 'Google Fonts Local Loading' ),
+                      ! empty( $loading['load_google_fonts_locally'] ) ? '1' : '0',
+                      false
+                  );
+              }
+
+              private static function set_by_title( array $titles, $value, bool $required ) : void {
+                  $normalized = array_map( array( __CLASS__, 'normalize_title' ), $titles );
+                  foreach ( self::$fields as $id => $field ) {
+                      $title = self::normalize_title( (string) ( $field['title'] ?? '' ) );
+                      if ( in_array( $title, $normalized, true ) ) {
+                          if ( ! self::set_value( $id, $value ) && $required ) {
+                              self::$errors[] = 'verify_failed:' . $id;
+                          }
+                          return;
+                      }
+                  }
+                  if ( $required ) {
+                      self::$errors[] = 'field_title_missing:' . implode( '|', $titles );
+                  }
+              }
+
+              private static function normalize_title( string $title ): string {
+                  $title = html_entity_decode( strip_tags( $title ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                  $title = strtolower( trim( preg_replace( '/\s+/', ' ', $title ) ) );
+                  return $title;
+              }
+
+              private static function set_required( string $id, $value ): void {
+                  if ( ! isset( self::$fields[ $id ] ) ) {
+                      self::$errors[] = 'field_missing:' . $id;
+                      return;
+                  }
+                  if ( ! self::set_value( $id, $value ) ) {
+                      self::$errors[] = 'verify_failed:' . $id;
+                  }
+              }
+
+              private static function set_optional( string $id, $value ): void {
+                  if ( ! isset( self::$fields[ $id ] ) ) {
+                      return;
+                  }
+                  self::set_value( $id, $value );
+              }
+
+              private static function set_value( string $id, $value ): bool {
+                  \Redux::setOption( self::REDUX_OPTION, $id, $value );
+                  $stored = \Redux::getOption( self::REDUX_OPTION, $id );
+                  $ok = self::equivalent( $stored, $value );
+                  if ( $ok ) {
+                      self::$applied[] = $id;
+                  }
+                  return $ok;
+              }
+
+              private static function equivalent( $a, $b ): bool {
+                  if ( is_array( $a ) || is_array( $b ) ) {
+                      return wp_json_encode( $a ) === wp_json_encode( $b );
+                  }
+                  return (string) $a === (string) $b;
+              }
+
+              private static function record_failure( array $errors ): void {
+                  update_option(
+                      self::RESULT_OPTION,
+                      array(
+                          'ok'      => false,
+                          'version' => self::PRESET_VERSION,
+                          'errors'  => array_values( array_unique( $errors ) ),
+                          'time'    => time(),
+                      ),
+                      false
+                  );
+              }
+          }
+          PHP
+
+          cp presets/templa-salient-theme-options.json "$ROOT/presets/templa-salient-theme-options.json"
+
+          python3 - "$ROOT" "$BASE_VERSION" "$VERSION" <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path(sys.argv[1]); base=sys.argv[2]; version=sys.argv[3]
+
+          main = root / 'h2o-ia-site-migrator.php'
+          s = main.read_text()
+          s = re.sub(r'Version:\s*' + re.escape(base), f'Version: {version}', s, count=1)
+          s = s.replace(f"define( 'H2OSM_VERSION', '{base}' )", f"define( 'H2OSM_VERSION', '{version}' )")
+          req = "require_once H2OSM_DIR . 'includes/class-salient-preset-applier.php';"
+          if req not in s:
+              needle = "require_once H2OSM_DIR . 'includes/class-content-validator.php';"
+              if needle not in s:
+                  raise SystemExit('VALIDATOR_REQUIRE_NOT_FOUND')
+              s = s.replace(needle, needle + "\n" + req, 1)
+          call = r"\H2O\Site_Migrator\Salient_Preset_Applier::register();"
+          if call not in s:
+              s += "\n" + call + "\n"
+          main.write_text(s)
+
+          profile = root / 'profiles/templa-design.php'
+          p = profile.read_text()
+          p = p.replace(f'h2o-site-migrator:templa-design:{base}', f'h2o-site-migrator:templa-design:{version}')
+          p = p.replace(f'data-h2osm-release="{base}"', f'data-h2osm-release="{version}"')
+          p = re.sub(r"'version'\s*=>\s*'[^']+'", f"'version' => '{version}'", p, count=1)
+          profile.write_text(p)
+          PY
+
+          # Static contract checks.
+          php -l "$ROOT/h2o-ia-site-migrator.php" >/dev/null
+          php -l "$ROOT/includes/class-salient-preset-applier.php" >/dev/null
+          php -l "$ROOT/includes/class-content-validator.php" >/dev/null
+          php -l "$ROOT/profiles/templa-design.php" >/dev/null
+          grep -q "Version: $VERSION" "$ROOT/h2o-ia-site-migrator.php"
+          grep -q "Redux::setOption" "$ROOT/includes/class-salient-preset-applier.php"
+          grep -q "redux/options/' . self::REDUX_OPTION . '/saved" "$ROOT/includes/class-salient-preset-applier.php"
+          ! grep -R --include='*.php' -Eq "get_option\s*\(\s*['\"]salient_redux" "$ROOT"
+          ! grep -R --include='*.php' -Eq "update_option\s*\(\s*['\"]salient_redux" "$ROOT"
+          test ! -e "$ROOT/assets/frontend.css"
+          ! grep -q 'font_size_desktop="16px"' "$ROOT/profiles/templa-design.php"
+
+          # Runtime-style unit test with Redux and WordPress stubs.
+          cat > "$WORK/test-preset.php" <<'PHP'
+          <?php
+          define('ABSPATH', __DIR__ . '/');
+          define('H2OSM_DIR', getenv('H2OSM_ROOT') . '/');
+
+          $GLOBALS['opts'] = array();
+          function add_action($hook,$callback,$priority=10){}
+          function current_user_can($cap){ return true; }
+          function get_option($key,$default=''){ return $GLOBALS['opts'][$key] ?? $default; }
+          function update_option($key,$value,$autoload=null){ $GLOBALS['opts'][$key]=$value; return true; }
+          function home_url($path='/'){ return 'https://templadesign.cl/'; }
+          function wp_parse_url($url,$component=-1){ return parse_url($url,$component); }
+          function wp_json_encode($value){ return json_encode($value); }
+          function do_action($hook){ $GLOBALS['saved_hook']=$hook; }
+          class ThemeStub {
+            public function get_template(){ return 'salient'; }
+            public function get_stylesheet(){ return 'salient'; }
+          }
+          function wp_get_theme(){ return new ThemeStub(); }
+
+          class Redux {
+            public static $fields = array();
+            public static $values = array();
+            public static function setOption($opt,$key,$value){ self::$values[$key]=$value; return true; }
+            public static function getOption($opt,$key){ return self::$values[$key] ?? null; }
+          }
+
+          $basic = array(
+            'logo-height'=>array('id'=>'logo-height','type'=>'text','title'=>'Logo Height'),
+            'mobile-logo-height'=>array('id'=>'mobile-logo-height','type'=>'text','title'=>'Mobile Logo Height'),
+            'header-padding'=>array('id'=>'header-padding','type'=>'text','title'=>'Header Padding'),
+            'header-menu-item-spacing'=>array('id'=>'header-menu-item-spacing','type'=>'slider','title'=>'Menu Item Spacing'),
+            'header-box-shadow'=>array('id'=>'header-box-shadow','type'=>'select','title'=>'Header Box Shadow'),
+            'header-hover-effect'=>array('id'=>'header-hover-effect','type'=>'select','title'=>'Header Link Hover/Active Effect'),
+            'accent-color'=>array('id'=>'accent-color','type'=>'color','title'=>'Accent Color'),
+            'extra-color-1'=>array('id'=>'extra-color-1','type'=>'color','title'=>'Extra Color #1'),
+            'extra-color-2'=>array('id'=>'extra-color-2','type'=>'color','title'=>'Extra Color #2'),
+            'overall-font-color'=>array('id'=>'overall-font-color','type'=>'color','title'=>'Overall Font Color'),
+            'default-theme-font'=>array('id'=>'default-theme-font','type'=>'select','title'=>'Default Theme Font Functionality'),
+            'heading-space'=>array('id'=>'heading-space','type'=>'text','title'=>'Heading Bottom Spacing'),
+            'paragraph-space'=>array('id'=>'paragraph-space','type'=>'text','title'=>'Paragraph Bottom Spacing'),
+            'local-fonts'=>array('id'=>'local-fonts','type'=>'switch','title'=>'Load Google Fonts Locally'),
+            'use-responsive-heading-typography'=>array('id'=>'use-responsive-heading-typography','type'=>'switch','title'=>'Custom Responsive Headings'),
+          );
+          $typo_ids = array(
+            'logo_font_family'=>'Logo Font','navigation_font_family'=>'Navigation Font',
+            'navigation_dropdown_font_family'=>'Navigation Dropdown Font',
+            'page_heading_font_family'=>'Page Heading Font',
+            'page_heading_subtitle_font_family'=>'Page Heading Subtitle Font',
+            'off_canvas_nav_font_family'=>'Off Canvas Navigation',
+            'off_canvas_nav_subtext_font_family'=>'Off Canvas Navigation/Dropdown Description Text',
+            'body_font_family'=>'Body Font','h1_font_family'=>'Heading 1','h2_font_family'=>'Heading 2',
+            'h3_font_family'=>'Heading 3','h4_font_family'=>'Heading 4','h5_font_family'=>'Heading 5',
+            'h6_font_family'=>'Heading 6','i_font_family'=>'Italic','bold_font_family'=>'Bold',
+            'label_font_family'=>'Form and Category Labels','sidebar_footer_h_font_family'=>'Nectar Button',
+            'nectar_sidebar_footer_headers_font_family'=>'Sidebar/Footer Headers',
+            'nectar_slider_heading_font_family'=>'Nectar/Home Slider Heading Font',
+            'home_slider_caption_font_family'=>'Nectar/Home Slider Caption Font',
+            'testimonial_font_family'=>'Testimonial Slider/Blockquote Font',
+            'blog_single_post_content_font_family'=>'Blog Single Post Content',
+            'portfolio_filters_font_family'=>'Portfolio/Post Grid Filters',
+            'portfolio_caption_font_family'=>'Portfolio Caption/Excerpt',
+            'team_member_h_font_family'=>'Sub-headers & Team Member Names Font',
+            'nectar_dropcap_font_family'=>'Dropcap',
+            'nectar_woo_shop_product_title_font_family'=>'WooCommerce Product Title Font',
+            'nectar_woo_shop_product_secondary_font_family'=>'WooCommerce Product Secondary Font'
+          );
+          foreach($typo_ids as $id=>$title){ $basic[$id]=array('id'=>$id,'type'=>'typography','title'=>$title); }
+          foreach(array('h1','h2','h3','h4','h5','h6','body','blockquote') as $g){
+            foreach(array('small-desktop','tablet','phone') as $bp){
+              $id=$g.'-'.$bp.'-font-size';
+              $basic[$id]=array('id'=>$id,'type'=>'slider','title'=>$id);
+            }
+          }
+          Redux::$fields['salient_redux'] = array_values($basic);
+
+          require getenv('H2OSM_ROOT') . '/includes/class-salient-preset-applier.php';
+
+          \H2O\Site_Migrator\Salient_Preset_Applier::maybe_apply();
+
+          $assert = function($cond,$msg){ if(!$cond){ fwrite(STDERR,"ASSERT_FAIL:$msg\n"); exit(1);} };
+          $assert(Redux::$values['logo-height']==='62','logo');
+          $assert(Redux::$values['header-hover-effect']==='default','hover');
+          $assert(Redux::$values['accent-color']==='#FFC300','accent');
+          $assert(Redux::$values['body_font_family']['font-family']==='Manrope','body family');
+          $assert(Redux::$values['body_font_family']['font-size']==='17px','body size');
+          $assert(Redux::$values['h1_font_family']['font-size']==='64px','h1');
+          $assert(Redux::$values['heading-space']==='0.55em','heading spacing');
+          $assert(Redux::$values['paragraph-space']==='1.25em','paragraph spacing');
+          $assert(($GLOBALS['opts']['h2osm_templa_salient_preset_applied'] ?? '')==='1.0.17','marker');
+          $assert(($GLOBALS['saved_hook'] ?? '')==='redux/options/salient_redux/saved','saved hook');
+
+          // One-time guarantee: later manual edits survive future admin loads.
+          Redux::$values['navigation_font_family']['font-size']='99px';
+          \H2O\Site_Migrator\Salient_Preset_Applier::maybe_apply();
+          $assert(Redux::$values['navigation_font_family']['font-size']==='99px','one-time no overwrite');
+
+          echo "PRESET_RUNTIME_TEST_OK\n";
+          PHP
+
+          H2OSM_ROOT="$ROOT" php "$WORK/test-preset.php"
+
+          {
+            echo "## $VERSION — 2026-10-06"
+            echo "- Aplica automáticamente una sola vez el preset visual Templa al Salient activo."
+            echo "- Usa exclusivamente la API pública Redux::setOption/Redux::getOption; no toca salient_redux directamente."
+            echo "- Completa todas las tipografías disponibles de Salient con Manrope y jerarquía Templa."
+            echo "- Fija Logo Height 62, hover Color Change y Accent #FFC300."
+            echo "- Completa Responsive Settings y los nuevos Heading/Paragraph Bottom Spacing."
+            echo "- Tras aplicar 1.0.17, cualquier ajuste manual posterior queda intacto."
+            echo "- No usa WPVibe, CSS compensatorio ni modifica WPBakery."
+            echo
+            cat "$ROOT/CHANGELOG.md"
+          } > "$WORK/CHANGELOG.md"
+          mv "$WORK/CHANGELOG.md" "$ROOT/CHANGELOG.md"
+
+          (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
+          SHA="$(sha256sum "$DIST/h2o-ia-site-migrator-$VERSION.zip" | awk '{print $1}')"
+          echo "$SHA" > "$DIST/package.sha256"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "PACKAGE_SHA=$SHA" >> "$GITHUB_ENV"
+
+          base64 -w0 "$DIST/h2o-ia-site-migrator-$VERSION.zip" > "$DIST/package.b64"
+          split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/raw-"
+
+          python3 - "$VERSION" "$SHA" "$DIST" <<'PY'
+          import json, pathlib, sys
+          version, sha, dist = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
+          raw = sorted((dist/'parts').glob('raw-*'))
+          parts=[f'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/{version}/part-{i:02d}.b64' for i in range(1,len(raw)+1)]
+          bootstrap={'version':version,'package_id':'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256','package_sha256':sha,'parts':parts,'tested':'7.1','requires_php':'8.0'}
+          release={'version':version,'package_url':f'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v{version}/h2o-ia-site-migrator-{version}.zip','package_sha256':sha,'tested':'7.1','requires_php':'8.0'}
+          (dist/'release-bootstrap.json').write_text(json.dumps(bootstrap,indent=2)+'\n')
+          (dist/'release.json').write_text(json.dumps(release,indent=2)+'\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h2o-ia-site-migrator-1.0.17-tested
+          path: |
+            dist-1017/h2o-ia-site-migrator-1.0.17.zip
+            dist-1017/release.json
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          PACKAGE="dist-1017/h2o-ia-site-migrator-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PACKAGE" dist-1017/release.json --clobber
+          else
+            gh release create "$TAG" "$PACKAGE" dist-1017/release.json \
+              --target main \
+              --title "h2o IA Site Migrator $VERSION" \
+              --notes "Templa: aplica una sola vez el sistema visual nativo de Salient (Manrope, logo 62, Color Change, #FFC300, responsive y spacing) mediante la API pública Redux, sin WPVibe ni CSS."
+          fi
+
+      - name: Publish updater chunks and manifest
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          put_file () {
+            path="$1"; file="$2"; msg="$3"
+            encoded="$(base64 -w0 "$file")"
+            sha="$(gh api "repos/$REPO/contents/$path?ref=main" --jq '.sha' 2>/dev/null || true)"
+            if [ -n "$sha" ]; then
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f sha="$sha" -f branch="main" >/dev/null
+            else
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f branch="main" >/dev/null
+            fi
+          }
+          i=1
+          for f in $(find dist-1017/parts -type f -name 'raw-*' | sort); do
+            target="$(printf 'bootstrap/%s/part-%02d.b64' "$VERSION" "$i")"
+            put_file "$target" "$f" "Site Migrator $VERSION package part $i"
+            i=$((i+1))
+          done
+          put_file "bootstrap/package.sha256" "dist-1017/package.sha256" "Site Migrator $VERSION checksum"
+          put_file "bootstrap/release.json" "dist-1017/release-bootstrap.json" "Publish Site Migrator $VERSION updater manifest"
