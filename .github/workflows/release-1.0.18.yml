@@ -1,0 +1,622 @@
+name: Test and release h2o IA Site Migrator 1.0.18
+
+on:
+  push:
+    branches:
+      - main
+      - fix/templa-funnels-1.0.18
+    paths:
+      - '.github/workflows/release-1.0.18.yml'
+      - 'bootstrap/trigger-1.0.18.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h2o-ia-site-migrator-1.0.18-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Funnel-aware 1.0.18
+        shell: bash
+        run: |
+          set -Euo pipefail
+          trap 'rc=$?; echo "FAILED line $LINENO: $BASH_COMMAND"; exit "$rc"' ERR
+
+          BASE_VERSION="1.0.17"
+          VERSION="1.0.18"
+          WORK="$RUNNER_TEMP/h2osm-$VERSION"
+          DIST="$GITHUB_WORKSPACE/dist-1018"
+
+          rm -rf "$WORK" "$DIST"
+          mkdir -p "$WORK/current" "$DIST/parts"
+
+          cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
+          unzip -q "$WORK/current.zip" -d "$WORK/current"
+          ROOT="$WORK/current/h2o-ia-site-migrator"
+
+          cat > "$ROOT/includes/class-funnels.php" <<'PHP'
+          <?php
+          namespace H2O\Site_Migrator;
+
+          if ( ! defined( 'ABSPATH' ) ) {
+              exit;
+          }
+
+          /**
+           * Public-HTTP-only Funnel consumer.
+           *
+           * Site Migrator never reads Funnel tables, options, classes, functions,
+           * postmeta or local IDs. It talks only to h2o.funnels.resources/v1.
+           *
+           * The Funnel component is expected to be installed on the target site.
+           * This keeps lead storage, runtime, assets and public endpoints owned by
+           * Funnels while this component remains only a consumer.
+           */
+          final class Funnels {
+              private const CONTRACT = 'h2o.funnels.resources/v1';
+              private const NAMESPACE = 'h2o-funnels-mktdigital/resources/v1';
+              private const REQUIRED_VERSION = '2.8.2';
+              private const CATALOG_CACHE = 'h2osm_funnels_catalog_v1';
+              private const CAPABILITIES_CACHE = 'h2osm_funnels_capabilities_v1';
+              private static array $printed_assets = array();
+
+              public static function register(): void {
+                  add_shortcode( 'h2osm_funnel', array( self::class, 'shortcode' ) );
+              }
+
+              public static function shortcode( array|string $atts = array() ): string {
+                  $atts = shortcode_atts(
+                      array(
+                          'context' => '',
+                          'funnel_uuid' => '',
+                      ),
+                      is_array( $atts ) ? $atts : array(),
+                      'h2osm_funnel'
+                  );
+
+                  $context = sanitize_key( (string) $atts['context'] );
+                  $requested_uuid = strtolower( sanitize_text_field( (string) $atts['funnel_uuid'] ) );
+
+                  if ( '' !== $requested_uuid && ! self::valid_uuid( $requested_uuid ) ) {
+                      return self::admin_note( 'El funnel_uuid configurado no es válido.' );
+                  }
+
+                  if ( '' === $requested_uuid && ! in_array( $context, array( 'corporate', 'residential', 'contact' ), true ) ) {
+                      return '';
+                  }
+
+                  $capabilities = self::capabilities();
+                  if ( is_wp_error( $capabilities ) ) {
+                      return self::dependency_note( $capabilities );
+                  }
+
+                  if ( '' !== $requested_uuid ) {
+                      return self::render_uuid( $requested_uuid, $context );
+                  }
+
+                  $catalog = self::catalog();
+                  if ( is_wp_error( $catalog ) ) {
+                      return self::admin_note( 'El contrato público de Funnels está disponible, pero no fue posible leer su catálogo.' );
+                  }
+
+                  $resource = self::resolve_context( $context, (array) ( $catalog['funnels'] ?? array() ) );
+                  if ( ! is_array( $resource ) ) {
+                      return self::admin_note(
+                          'Funnels está conectado, pero no existe un Funnel activo inequívoco para el contexto ' . $context . '.'
+                      );
+                  }
+
+                  $uuid = strtolower( sanitize_text_field( (string) ( $resource['funnel_uuid'] ?? '' ) ) );
+                  if ( ! self::valid_uuid( $uuid ) ) {
+                      return self::admin_note( 'El Funnel resuelto no expone un funnel_uuid válido.' );
+                  }
+
+                  return self::render_uuid( $uuid, $context );
+              }
+
+              private static function capabilities(): array|\WP_Error {
+                  $cached = get_transient( self::CAPABILITIES_CACHE );
+                  if ( is_array( $cached ) && self::CONTRACT === (string) ( $cached['contract'] ?? '' ) ) {
+                      return $cached;
+                  }
+
+                  $payload = self::get_json( rest_url( self::NAMESPACE . '/capabilities' ) );
+                  if ( is_wp_error( $payload ) ) {
+                      return $payload;
+                  }
+
+                  $version = sanitize_text_field( (string) ( $payload['component_version'] ?? '' ) );
+                  if (
+                      true !== ( $payload['ok'] ?? false ) ||
+                      self::CONTRACT !== (string) ( $payload['contract'] ?? '' ) ||
+                      true !== ( $payload['resource_catalog'] ?? false ) ||
+                      ! is_array( $payload['embed_contract'] ?? null )
+                  ) {
+                      return new \WP_Error(
+                          'h2osm_funnels_contract_unavailable',
+                          'El componente Funnels no publica el contrato requerido.'
+                      );
+                  }
+
+                  if ( '' === $version || version_compare( $version, self::REQUIRED_VERSION, '<' ) ) {
+                      return new \WP_Error(
+                          'h2osm_funnels_update_required',
+                          'La versión instalada de Funnels no soporta el embed público requerido.',
+                          array(
+                              'installed' => $version,
+                              'required' => self::REQUIRED_VERSION,
+                          )
+                      );
+                  }
+
+                  set_transient( self::CAPABILITIES_CACHE, $payload, 5 * MINUTE_IN_SECONDS );
+                  return $payload;
+              }
+
+              private static function catalog(): array|\WP_Error {
+                  $cached = get_transient( self::CATALOG_CACHE );
+                  if ( is_array( $cached ) && self::CONTRACT === (string) ( $cached['contract'] ?? '' ) ) {
+                      return $cached;
+                  }
+
+                  $payload = self::get_json(
+                      add_query_arg(
+                          'status',
+                          'active',
+                          rest_url( self::NAMESPACE . '/funnels' )
+                      )
+                  );
+
+                  if ( is_wp_error( $payload ) ) {
+                      return $payload;
+                  }
+
+                  if (
+                      true !== ( $payload['ok'] ?? false ) ||
+                      self::CONTRACT !== (string) ( $payload['contract'] ?? '' ) ||
+                      ! is_array( $payload['funnels'] ?? null )
+                  ) {
+                      return new \WP_Error( 'h2osm_funnel_contract_invalid', 'Contrato público de Funnels inválido.' );
+                  }
+
+                  set_transient( self::CATALOG_CACHE, $payload, 2 * MINUTE_IN_SECONDS );
+                  return $payload;
+              }
+
+              private static function render_uuid( string $uuid, string $context = '' ): string {
+                  $payload = self::get_json(
+                      rest_url(
+                          self::NAMESPACE . '/funnels/' . rawurlencode( $uuid ) . '/embed'
+                      )
+                  );
+
+                  if ( is_wp_error( $payload ) ) {
+                      return self::admin_note( 'El Funnel existe como referencia, pero no fue posible obtener su embed público.' );
+                  }
+
+                  if (
+                      true !== ( $payload['ok'] ?? false ) ||
+                      self::CONTRACT !== (string) ( $payload['contract'] ?? '' ) ||
+                      $uuid !== strtolower( (string) ( $payload['funnel_uuid'] ?? '' ) ) ||
+                      ! is_array( $payload['embed'] ?? null )
+                  ) {
+                      return self::admin_note( 'Funnels devolvió un payload que no cumple el contrato público esperado.' );
+                  }
+
+                  $embed = $payload['embed'];
+                  $html = (string) ( $embed['html'] ?? '' );
+                  if ( '' === trim( $html ) ) {
+                      return self::admin_note( 'El Funnel público no entregó contenido renderizable.' );
+                  }
+
+                  $assets = self::asset_tags( (array) ( $embed['styles'] ?? array() ), 'style' );
+                  $assets .= self::asset_tags( (array) ( $embed['scripts'] ?? array() ), 'script' );
+
+                  return $assets
+                      . '<div class="h2osm-funnel-remote" data-h2osm-funnel-context="' . esc_attr( $context ) . '" data-h2osm-funnel-uuid="' . esc_attr( $uuid ) . '">'
+                      . $html
+                      . '</div>';
+              }
+
+              private static function get_json( string $url ): array|\WP_Error {
+                  $home_host = self::normalize_host( (string) wp_parse_url( home_url( '/' ), PHP_URL_HOST ) );
+                  $url_host = self::normalize_host( (string) wp_parse_url( $url, PHP_URL_HOST ) );
+
+                  if ( '' === $home_host || $home_host !== $url_host ) {
+                      return new \WP_Error( 'h2osm_funnel_origin_rejected', 'Origen HTTP no permitido.' );
+                  }
+
+                  $response = wp_safe_remote_get(
+                      $url,
+                      array(
+                          'timeout' => 8,
+                          'redirection' => 0,
+                          'headers' => array(
+                              'Accept' => 'application/json',
+                              'X-H2O-Contract' => self::CONTRACT,
+                              'X-H2O-Consumer' => 'h2o-ia-site-migrator',
+                          ),
+                      )
+                  );
+
+                  if ( is_wp_error( $response ) ) {
+                      return $response;
+                  }
+
+                  $status = (int) wp_remote_retrieve_response_code( $response );
+                  if ( 404 === $status ) {
+                      return new \WP_Error(
+                          'h2osm_funnels_component_missing',
+                          'El contrato público de Funnels no existe en este sitio.',
+                          array( 'status' => 404 )
+                      );
+                  }
+                  if ( 200 !== $status ) {
+                      return new \WP_Error(
+                          'h2osm_funnel_http_error',
+                          'Funnels no respondió 200.',
+                          array( 'status' => $status )
+                      );
+                  }
+
+                  $payload = json_decode( wp_remote_retrieve_body( $response ), true );
+                  return is_array( $payload )
+                      ? $payload
+                      : new \WP_Error( 'h2osm_funnel_json_invalid', 'Respuesta JSON inválida.' );
+              }
+
+              private static function dependency_note( \WP_Error $error ): string {
+                  $code = $error->get_error_code();
+
+                  if ( 'h2osm_funnels_component_missing' === $code ) {
+                      return self::admin_note(
+                          'h2o Funnels MktDigital 2.8.2 debe estar instalado y activo en Templa para mostrar este Funnel.'
+                      );
+                  }
+
+                  if ( 'h2osm_funnels_update_required' === $code ) {
+                      $data = $error->get_error_data();
+                      $installed = is_array( $data ) ? sanitize_text_field( (string) ( $data['installed'] ?? '' ) ) : '';
+                      return self::admin_note(
+                          'h2o Funnels MktDigital requiere actualización a 2.8.2 o superior'
+                          . ( '' !== $installed ? ' (instalada: ' . $installed . ')' : '' )
+                          . '.'
+                      );
+                  }
+
+                  return self::admin_note(
+                      'El contrato público h2o.funnels.resources/v1 no está disponible. Revisa h2o Funnels MktDigital 2.8.2.'
+                  );
+              }
+
+              private static function resolve_context( string $context, array $funnels ): ?array {
+                  $best = null;
+                  $best_score = 0;
+                  $ambiguous = false;
+
+                  foreach ( $funnels as $funnel ) {
+                      if ( ! is_array( $funnel ) || 'active' !== (string) ( $funnel['status'] ?? '' ) ) {
+                          continue;
+                      }
+
+                      $score = self::score( $context, $funnel );
+                      if ( $score <= 0 ) {
+                          continue;
+                      }
+
+                      if ( $score > $best_score ) {
+                          $best = $funnel;
+                          $best_score = $score;
+                          $ambiguous = false;
+                          continue;
+                      }
+
+                      if ( $score === $best_score && is_array( $best ) ) {
+                          $current_uuid = strtolower( (string) ( $funnel['funnel_uuid'] ?? '' ) );
+                          $best_uuid = strtolower( (string) ( $best['funnel_uuid'] ?? '' ) );
+                          if ( $current_uuid !== $best_uuid ) {
+                              $ambiguous = true;
+                          }
+                      }
+                  }
+
+                  return $ambiguous ? null : $best;
+              }
+
+              private static function score( string $context, array $funnel ): int {
+                  $key = self::normal( (string) ( $funnel['public_key'] ?? '' ) );
+                  $category = self::normal( (string) ( $funnel['category'] ?? '' ) );
+                  $name = self::normal( (string) ( $funnel['name'] ?? '' ) );
+
+                  if ( 'contact' === $context ) {
+                      if ( 'formulario contacto' === $key ) {
+                          return 1000;
+                      }
+                      return self::keyword_score( array( 'contacto', 'contact' ), $key, $category, $name );
+                  }
+
+                  if ( 'residential' === $context ) {
+                      return self::keyword_score(
+                          array( 'residencial', 'residential', 'vivienda', 'hogar', 'casa', 'departamento' ),
+                          $key,
+                          $category,
+                          $name
+                      );
+                  }
+
+                  return self::keyword_score(
+                      array( 'corporativo', 'corporate', 'empresa', 'oficina', 'trabajo', 'comercial', 'business', 'b2b' ),
+                      $key,
+                      $category,
+                      $name
+                  );
+              }
+
+              private static function keyword_score( array $keywords, string $key, string $category, string $name ): int {
+                  $score = 0;
+                  foreach ( $keywords as $keyword ) {
+                      $needle = self::normal( (string) $keyword );
+                      if ( '' === $needle ) {
+                          continue;
+                      }
+                      if ( $key === $needle ) {
+                          $score = max( $score, 900 );
+                      } elseif ( '' !== $key && str_contains( $key, $needle ) ) {
+                          $score = max( $score, 700 );
+                      }
+                      if ( $category === $needle ) {
+                          $score = max( $score, 850 );
+                      } elseif ( '' !== $category && str_contains( $category, $needle ) ) {
+                          $score = max( $score, 650 );
+                      }
+                      if ( $name === $needle ) {
+                          $score = max( $score, 800 );
+                      } elseif ( '' !== $name && str_contains( $name, $needle ) ) {
+                          $score = max( $score, 500 );
+                      }
+                  }
+                  return $score;
+              }
+
+              private static function normal( string $value ): string {
+                  $value = remove_accents( strtolower( trim( $value ) ) );
+                  $value = preg_replace( '/[^a-z0-9]+/', ' ', $value );
+                  return trim( (string) $value );
+              }
+
+              private static function normalize_host( string $host ): string {
+                  $host = strtolower( trim( $host ) );
+                  return str_starts_with( $host, 'www.' ) ? substr( $host, 4 ) : $host;
+              }
+
+              private static function valid_uuid( string $uuid ): bool {
+                  return 1 === preg_match( '/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', $uuid );
+              }
+
+              private static function asset_tags( array $urls, string $kind ): string {
+                  $out = '';
+                  $home_host = self::normalize_host( (string) wp_parse_url( home_url( '/' ), PHP_URL_HOST ) );
+
+                  foreach ( $urls as $raw ) {
+                      $url = esc_url_raw( (string) $raw, array( 'https', 'http' ) );
+                      $asset_host = self::normalize_host( (string) wp_parse_url( $url, PHP_URL_HOST ) );
+                      if ( '' === $url || $asset_host !== $home_host ) {
+                          continue;
+                      }
+
+                      $fingerprint = $kind . '|' . $url;
+                      if ( isset( self::$printed_assets[ $fingerprint ] ) ) {
+                          continue;
+                      }
+                      self::$printed_assets[ $fingerprint ] = true;
+
+                      if ( 'style' === $kind ) {
+                          $out .= '<link rel="stylesheet" href="' . esc_url( $url ) . '">';
+                      } else {
+                          $out .= '<script src="' . esc_url( $url ) . '"></script>';
+                      }
+                  }
+
+                  return $out;
+              }
+
+              private static function admin_note( string $message ): string {
+                  return current_user_can( 'manage_options' )
+                      ? '<p class="h2osm-funnel-note">' . esc_html( $message ) . '</p>'
+                      : '';
+              }
+          }
+          PHP
+
+          python3 - "$ROOT" "$BASE_VERSION" "$VERSION" <<'PY'
+          import pathlib, re, sys
+          root=pathlib.Path(sys.argv[1]); base=sys.argv[2]; version=sys.argv[3]
+
+          main=root/'h2o-ia-site-migrator.php'
+          s=main.read_text()
+          s=re.sub(r'Version:\s*'+re.escape(base),f'Version: {version}',s,count=1)
+          s=s.replace(f"define( 'H2OSM_VERSION', '{base}' )",f"define( 'H2OSM_VERSION', '{version}' )")
+          main.write_text(s)
+
+          profile=root/'profiles/templa-design.php'
+          p=profile.read_text()
+          p=p.replace(f'h2o-site-migrator:templa-design:{base}',f'h2o-site-migrator:templa-design:{version}')
+          p=p.replace(f'data-h2osm-release="{base}"',f'data-h2osm-release="{version}"')
+          p=re.sub(r"'version'\s*=>\s*'[^']+'",f"'version' => '{version}'",p,count=1)
+          profile.write_text(p)
+          PY
+
+          php -l "$ROOT/h2o-ia-site-migrator.php" >/dev/null
+          php -l "$ROOT/includes/class-funnels.php" >/dev/null
+          php -l "$ROOT/profiles/templa-design.php" >/dev/null
+
+          grep -q "Version: $VERSION" "$ROOT/h2o-ia-site-migrator.php"
+          grep -q "REQUIRED_VERSION = '2.8.2'" "$ROOT/includes/class-funnels.php"
+          grep -q "'funnel_uuid' => ''" "$ROOT/includes/class-funnels.php"
+          grep -q "/capabilities" "$ROOT/includes/class-funnels.php"
+          grep -q "formulario contacto" "$ROOT/includes/class-funnels.php"
+          ! grep -R --include='*.php' -q "H2OFM_" "$ROOT/includes/class-funnels.php"
+          ! grep -R --include='*.php' -q "\$wpdb" "$ROOT/includes/class-funnels.php"
+
+          cat > "$WORK/test-funnels.php" <<'PHP'
+          <?php
+          define('ABSPATH', __DIR__.'/');
+          define('MINUTE_IN_SECONDS',60);
+          $GLOBALS['transients']=[];
+          $GLOBALS['responses']=[];
+          function add_shortcode(...$x){}
+          function shortcode_atts($defaults,$atts,$tag=''){return array_merge($defaults,$atts);}
+          function sanitize_key($v){return strtolower(preg_replace('/[^a-z0-9_-]/','',(string)$v));}
+          function sanitize_text_field($v){return trim(strip_tags((string)$v));}
+          function remove_accents($v){return strtr($v,['á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u','ñ'=>'n']);}
+          function get_transient($k){return $GLOBALS['transients'][$k]??false;}
+          function set_transient($k,$v,$ttl){$GLOBALS['transients'][$k]=$v;return true;}
+          function rest_url($p=''){return 'https://templadesign.cl/wp-json/'.ltrim($p,'/');}
+          function home_url($p='/'){return 'https://templadesign.cl/';}
+          function wp_parse_url($u,$component=-1){return parse_url($u,$component);}
+          function add_query_arg($k,$v,$u){return $u.(str_contains($u,'?')?'&':'?').rawurlencode($k).'='.rawurlencode($v);}
+          function is_wp_error($v){return $v instanceof WP_Error;}
+          function wp_safe_remote_get($url,$args=[]){return $GLOBALS['responses'][$url]??new WP_Error('missing','missing');}
+          function wp_remote_retrieve_response_code($r){return $r['code']??0;}
+          function wp_remote_retrieve_body($r){return $r['body']??'';}
+          function current_user_can($c){return true;}
+          function esc_html($v){return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8');}
+          function esc_attr($v){return esc_html($v);}
+          function esc_url_raw($v,$p=[]){return (string)$v;}
+          function esc_url($v){return esc_html($v);}
+          class WP_Error{
+            public function __construct(private string $code,private string $msg='',private $data=null){}
+            public function get_error_code(){return $this->code;}
+            public function get_error_data(){return $this->data;}
+          }
+          require getenv('H2OSM_ROOT').'/includes/class-funnels.php';
+
+          $contract='h2o.funnels.resources/v1';
+          $cap='https://templadesign.cl/wp-json/h2o-funnels-mktdigital/resources/v1/capabilities';
+          $catalog='https://templadesign.cl/wp-json/h2o-funnels-mktdigital/resources/v1/funnels?status=active';
+          $uuid='11111111-1111-4111-8111-111111111111';
+          $embed='https://templadesign.cl/wp-json/h2o-funnels-mktdigital/resources/v1/funnels/'.$uuid.'/embed';
+
+          $GLOBALS['responses'][$cap]=['code'=>200,'body'=>json_encode([
+            'ok'=>true,'contract'=>$contract,'component_version'=>'2.8.2',
+            'resource_catalog'=>true,'embed_contract'=>['transport'=>'https-json']
+          ])];
+          $GLOBALS['responses'][$catalog]=['code'=>200,'body'=>json_encode([
+            'ok'=>true,'contract'=>$contract,'funnels'=>[
+              ['funnel_uuid'=>$uuid,'name'=>'Formulario de contacto','status'=>'active','public_key'=>'formulario-contacto','category'=>'','type'=>'lead_form']
+            ]
+          ])];
+          $GLOBALS['responses'][$embed]=['code'=>200,'body'=>json_encode([
+            'ok'=>true,'contract'=>$contract,'funnel_uuid'=>$uuid,
+            'embed'=>['html'=>'<div class="funnel-ok">OK</div>','styles'=>[],'scripts'=>[]]
+          ])];
+
+          $out=\H2O\Site_Migrator\Funnels::shortcode(['context'=>'contact']);
+          if(!str_contains($out,'funnel-ok')||!str_contains($out,$uuid)){fwrite(STDERR,"CONTACT_RESOLVE_FAIL\n");exit(1);}
+
+          $out=\H2O\Site_Migrator\Funnels::shortcode(['funnel_uuid'=>$uuid]);
+          if(!str_contains($out,'funnel-ok')){fwrite(STDERR,"UUID_RESOLVE_FAIL\n");exit(1);}
+
+          $GLOBALS['transients']=[];
+          $GLOBALS['responses'][$cap]=['code'=>404,'body'=>''];
+          $out=\H2O\Site_Migrator\Funnels::shortcode(['context'=>'contact']);
+          if(!str_contains($out,'2.8.2 debe estar instalado y activo')){fwrite(STDERR,"DEPENDENCY_MESSAGE_FAIL\n");exit(1);}
+
+          echo "TEMPLA_FUNNELS_CONSUMER_1018_OK\n";
+          PHP
+
+          H2OSM_ROOT="$ROOT" php "$WORK/test-funnels.php"
+
+          {
+            echo "## $VERSION — 2026-10-06"
+            echo "- Diagnostica explícitamente la dependencia h2o Funnels MktDigital 2.8.2."
+            echo "- Valida /capabilities antes de consultar el catálogo."
+            echo "- Añade binding directo y estable por funnel_uuid; context queda como fallback compatible."
+            echo "- El contexto contact resuelve el bundled Formulario de contacto de Funnels."
+            echo "- Mantiene same-origin: Templa consume su propia instalación de Funnels por HTTP público."
+            echo "- No usa internals de Funnels, WPVibe ni CSS compensatorio."
+            echo
+            cat "$ROOT/CHANGELOG.md"
+          } > "$WORK/CHANGELOG.md"
+          mv "$WORK/CHANGELOG.md" "$ROOT/CHANGELOG.md"
+
+          (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
+          SHA="$(sha256sum "$DIST/h2o-ia-site-migrator-$VERSION.zip" | awk '{print $1}')"
+          echo "$SHA" > "$DIST/package.sha256"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "PACKAGE_SHA=$SHA" >> "$GITHUB_ENV"
+
+          base64 -w0 "$DIST/h2o-ia-site-migrator-$VERSION.zip" > "$DIST/package.b64"
+          split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/raw-"
+
+          python3 - "$VERSION" "$SHA" "$DIST" <<'PY'
+          import json,pathlib,sys
+          version,sha,dist=sys.argv[1],sys.argv[2],pathlib.Path(sys.argv[3])
+          raw=sorted((dist/'parts').glob('raw-*'))
+          parts=[f'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/{version}/part-{i:02d}.b64' for i in range(1,len(raw)+1)]
+          bootstrap={'version':version,'package_id':'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256','package_sha256':sha,'parts':parts,'tested':'7.1','requires_php':'8.0'}
+          release={'version':version,'package_url':f'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v{version}/h2o-ia-site-migrator-{version}.zip','package_sha256':sha,'tested':'7.1','requires_php':'8.0'}
+          (dist/'release-bootstrap.json').write_text(json.dumps(bootstrap,indent=2)+'\n')
+          (dist/'release.json').write_text(json.dumps(release,indent=2)+'\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h2o-ia-site-migrator-1.0.18-tested
+          path: |
+            dist-1018/h2o-ia-site-migrator-1.0.18.zip
+            dist-1018/release.json
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          PACKAGE="dist-1018/h2o-ia-site-migrator-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PACKAGE" dist-1018/release.json --clobber
+          else
+            gh release create "$TAG" "$PACKAGE" dist-1018/release.json \
+              --target main \
+              --title "h2o IA Site Migrator $VERSION" \
+              --notes "Templa Funnels: capabilities first, requisito explícito Funnels 2.8.2, binding estable por funnel_uuid y fallback compatible por contexto."
+          fi
+
+      - name: Publish updater chunks and manifest
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          put_file () {
+            path="$1"; file="$2"; msg="$3"
+            encoded="$(base64 -w0 "$file")"
+            sha="$(gh api "repos/$REPO/contents/$path?ref=main" --jq '.sha' 2>/dev/null || true)"
+            if [ -n "$sha" ]; then
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f sha="$sha" -f branch="main" >/dev/null
+            else
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f branch="main" >/dev/null
+            fi
+          }
+          i=1
+          for f in $(find dist-1018/parts -type f -name 'raw-*' | sort); do
+            target="$(printf 'bootstrap/%s/part-%02d.b64' "$VERSION" "$i")"
+            put_file "$target" "$f" "Site Migrator $VERSION package part $i"
+            i=$((i+1))
+          done
+          put_file "bootstrap/package.sha256" "dist-1018/package.sha256" "Site Migrator $VERSION checksum"
+          put_file "bootstrap/release.json" "dist-1018/release-bootstrap.json" "Publish Site Migrator $VERSION updater manifest"
