@@ -620,7 +620,7 @@ jobs:
           grep -q "Version: $VERSION" "$ROOT/h2o-ia-site-migrator.php"
           grep -q "h2o.funnels.resources-admin/v1" "$ROOT/includes/class-whatsapp-onboarding.php"
           grep -q "REQUIRED_FUNNELS_VERSION = '2.8.3'" "$ROOT/includes/class-whatsapp-onboarding.php"
-          grep -q "wa\\.me" "$ROOT/includes/class-whatsapp-onboarding.php"
+          grep -Fq "'wa_me'" "$ROOT/includes/class-whatsapp-onboarding.php"
           grep -q "wp_safe_remote_post" "$ROOT/includes/class-whatsapp-onboarding.php"
           ! grep -q "H2OFM_" "$ROOT/includes/class-whatsapp-onboarding.php"
           ! grep -q "\$wpdb" "$ROOT/includes/class-whatsapp-onboarding.php"
