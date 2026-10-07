@@ -29,5 +29,9 @@ jobs:
           nl -ba "$ROOT/includes/class-plugin.php" | sed -n '1,220p'
           echo "=== profile loader ==="
           grep -RniE "profile|profiles|source_url|source|pages" "$ROOT/includes" | head -n 300 || true
+          echo "=== profile tail ==="
+          nl -ba "$ROOT/profiles/templa-design.php" | tail -n 160
+          echo "=== registry ==="
+          nl -ba "$ROOT/includes/class-registry.php" | sed -n '1,260p'
           echo "=== files ==="
           find "$ROOT/includes" -maxdepth 1 -type f -print | sort
