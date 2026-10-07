@@ -1,0 +1,31 @@
+name: Inspect page edit ownership 1.0.22
+on:
+  push:
+    branches:
+      - fix/editable-pages-1.0.23
+    paths:
+      - '.github/workflows/inspect-editability-1022.yml'
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/h2osm1022"
+          mkdir -p "$WORK"
+          cat bootstrap/1.0.22/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/pkg.zip"
+          unzip -q "$WORK/pkg.zip" -d "$WORK/pkg"
+          ROOT="$WORK/pkg/h2o-ia-site-migrator"
+          echo "=== hooks and writes ==="
+          grep -RniE "save_post|wp_insert_post|wp_update_post|transition_post_status|admin_init|template_redirect|redirect_post_location|post_updated|wp_after_insert_post|edit_form|current_user_can|readonly|disabled|lock|managed|sync|update_post_meta|register_post_meta" "$ROOT" | head -n 700 || true
+          echo "=== class-sync ==="
+          nl -ba "$ROOT/includes/class-sync.php" | sed -n '1,360p'
+          echo "=== plugin ==="
+          nl -ba "$ROOT/includes/class-plugin.php" | sed -n '1,360p'
+          echo "=== main ==="
+          nl -ba "$ROOT/h2o-ia-site-migrator.php" | sed -n '1,320p'
+          echo "=== registry ==="
+          nl -ba "$ROOT/includes/class-registry.php" | sed -n '1,360p'
