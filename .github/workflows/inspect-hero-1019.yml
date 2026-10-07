@@ -1,0 +1,27 @@
+name: Inspect 1.0.19 hero pipeline
+on:
+  push:
+    branches:
+      - fix/nectar-slider-hero-1.0.20
+    paths:
+      - '.github/workflows/inspect-hero-1019.yml'
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/h2osm119"
+          mkdir -p "$WORK"
+          cat bootstrap/1.0.19/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/pkg.zip"
+          unzip -q "$WORK/pkg.zip" -d "$WORK/pkg"
+          ROOT="$WORK/pkg/h2o-ia-site-migrator"
+          echo "=== hero refs ==="
+          grep -RniE "hero|h2osm-hero|full_width_content|bg_image|button" "$ROOT" | head -n 500 || true
+          echo "=== profile ==="
+          sed -n '1,520p' "$ROOT/profiles/templa-design.php"
+          echo "=== files ==="
+          find "$ROOT/includes" -maxdepth 1 -type f -print | sort
