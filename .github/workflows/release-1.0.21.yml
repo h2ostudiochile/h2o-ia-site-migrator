@@ -273,7 +273,7 @@ jobs:
               fwrite( STDERR, "INTENTIONAL_SPACING_REMOVED\n" );
               exit(1);
           }
-          if ( ! str_contains( $out, '[vc_row bg_image="55">' ) ) {
+          if ( ! str_contains( $out, '[vc_row bg_image="55"]' ) ) {
               fwrite( STDERR, "VISUAL_EMPTY_ROW_REMOVED\n" );
               exit(1);
           }
