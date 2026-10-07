@@ -77,10 +77,11 @@ jobs:
           if n != 1:
               raise SystemExit('ACTIVATE_METHOD_PATCH_FAILED')
 
-          maybe_pattern = re.compile(
-              r"    public static function maybe_sync\(\): void \{.*?\n    \}\n\n    public static function sync",
-              re.S,
-          )
+          maybe_start = s.find("    public static function maybe_sync(): void {")
+          sync_start = s.find("    public static function sync(", maybe_start)
+          if maybe_start < 0 or sync_start < 0:
+              raise SystemExit('MAYBE_SYNC_METHOD_PATCH_FAILED')
+
           maybe_replacement = """    public static function maybe_sync(): void {
               $profile = Registry::current_profile();
               if ( ! $profile ) {
@@ -104,10 +105,8 @@ jobs:
               self::record_handoff_state( $state );
           }
 
-          public static function sync"""
-          s, n = maybe_pattern.subn(maybe_replacement, s, count=1)
-          if n != 1:
-              raise SystemExit('MAYBE_SYNC_METHOD_PATCH_FAILED')
+          """
+          s = s[:maybe_start] + maybe_replacement + s[sync_start:]
 
           state_needle = """            'managed_pages'   => $managed,
               'synced_at'       => gmdate( 'c' ),
