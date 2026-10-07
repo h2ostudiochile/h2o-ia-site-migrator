@@ -1,0 +1,377 @@
+name: Test and release h2o IA Site Migrator 1.0.23
+
+on:
+  push:
+    branches:
+      - main
+      - fix/editable-pages-1.0.23
+    paths:
+      - '.github/workflows/release-1.0.23.yml'
+      - 'bootstrap/trigger-1.0.23.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h2o-ia-site-migrator-1.0.23-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build editable page handoff 1.0.23
+        shell: bash
+        run: |
+          set -Euo pipefail
+          trap 'rc=$?; echo "FAILED line $LINENO: $BASH_COMMAND"; exit "$rc"' ERR
+
+          BASE_VERSION="1.0.22"
+          VERSION="1.0.23"
+          WORK="$RUNNER_TEMP/h2osm-$VERSION"
+          DIST="$GITHUB_WORKSPACE/dist-1023"
+
+          rm -rf "$WORK" "$DIST"
+          mkdir -p "$WORK/current" "$DIST/parts"
+
+          cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
+          unzip -q "$WORK/current.zip" -d "$WORK/current"
+          ROOT="$WORK/current/h2o-ia-site-migrator"
+
+          python3 - "$ROOT" <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+
+          main = root / 'h2o-ia-site-migrator.php'
+          s = main.read_text()
+          s = s.replace('Version: 1.0.22', 'Version: 1.0.23')
+          s = s.replace("define( 'H2OSM_VERSION', '1.0.22' );", "define( 'H2OSM_VERSION', '1.0.23' );")
+          main.write_text(s)
+
+          sync = root / 'includes/class-sync.php'
+          s = sync.read_text()
+
+          activate_pattern = re.compile(
+              r"    public static function activate\(\): void \{.*?\n    \}\n\n    public static function maybe_sync",
+              re.S,
+          )
+          activate_replacement = """    public static function activate(): void {
+              // First activation performs the migration. Once a migration state
+              // already exists, reactivation is a handoff-preserving no-op:
+              // manual WPBakery edits belong to the editor, not to this plugin.
+              $state = self::state();
+              if ( ! empty( $state ) ) {
+                  self::record_handoff_state( $state );
+                  return;
+              }
+
+              self::sync( true );
+          }
+
+          public static function maybe_sync"""
+          s, n = activate_pattern.subn(activate_replacement, s, count=1)
+          if n != 1:
+              raise SystemExit('ACTIVATE_METHOD_PATCH_FAILED')
+
+          maybe_pattern = re.compile(
+              r"    public static function maybe_sync\(\): void \{.*?\n    \}\n\n    public static function sync",
+              re.S,
+          )
+          maybe_replacement = """    public static function maybe_sync(): void {
+              $profile = Registry::current_profile();
+              if ( ! $profile ) {
+                  return;
+              }
+
+              $state = self::state();
+
+              // CRITICAL HANDOFF RULE:
+              // init must never rewrite page content. A migrated page becomes
+              // ordinary editable WordPress/WPBakery content immediately after
+              // migration. Plugin/profile version changes and missing embedded
+              // markers are NOT reasons to call sync().
+              if ( empty( $state ) ) {
+                  return;
+              }
+
+              $state['plugin_version']  = H2OSM_VERSION;
+              $state['profile_key']     = (string) ( $profile['key'] ?? '' );
+              $state['profile_version'] = (string) ( $profile['version'] ?? '' );
+              self::record_handoff_state( $state );
+          }
+
+          public static function sync"""
+          s, n = maybe_pattern.subn(maybe_replacement, s, count=1)
+          if n != 1:
+              raise SystemExit('MAYBE_SYNC_METHOD_PATCH_FAILED')
+
+          state_needle = """            'managed_pages'   => $managed,
+              'synced_at'       => gmdate( 'c' ),
+          );"""
+          state_replacement = """            'managed_pages'   => $managed,
+              'synced_at'       => gmdate( 'c' ),
+              'content_handoff' => true,
+              'content_owner'   => 'editor',
+          );"""
+          if state_needle not in s:
+              raise SystemExit('STATE_BLOCK_NOT_FOUND')
+          s = s.replace(state_needle, state_replacement, 1)
+
+          insert_before = """    public static function state(): array {"""
+          helper = """    private static function record_handoff_state( array $state ): void {
+              $state['content_handoff'] = true;
+              $state['content_owner']   = 'editor';
+              $state['handoff_at']      = (string) ( $state['handoff_at'] ?? gmdate( 'c' ) );
+              update_option( self::STATE_OPTION, $state, false );
+          }
+
+          """
+          if helper.strip() not in s:
+              if insert_before not in s:
+                  raise SystemExit('STATE_METHOD_NOT_FOUND')
+              s = s.replace(insert_before, helper + insert_before, 1)
+
+          sync.write_text(s)
+
+          admin = root / 'includes/class-admin.php'
+          a = admin.read_text()
+          a = a.replace(
+              '>Aplicar release nuevamente</a>',
+              ' onclick="return confirm(\'Esto sobrescribirá las páginas migradas con el contenido empaquetado y puede descartar cambios manuales. ¿Continuar?\');">Reaplicar migración (sobrescribe contenido)</a>'
+          )
+          warning_needle = '<p><small>Última sincronización:'
+          warning = '<p><strong>Las páginas migradas quedan libres para editar.</strong> La reaplicación manual es destructiva y solo debe usarse si quieres reemplazar tus cambios.</p>\n                '
+          if warning not in a and warning_needle in a:
+              a = a.replace(warning_needle, warning + warning_needle, 1)
+          admin.write_text(a)
+
+          profile = root / 'profiles/templa-design.php'
+          p = profile.read_text().replace('1.0.22', '1.0.23')
+          profile.write_text(p)
+
+          changelog = root / 'CHANGELOG.md'
+          old = changelog.read_text() if changelog.exists() else ''
+          entry = """## 1.0.23 — 2026-10-07
+          - Corrige el takeover de páginas migradas: Site Migrator deja de resincronizar contenido automáticamente en init.
+          - Una vez migrada, la página queda entregada al editor humano y completamente editable en WPBakery.
+          - Cambiar la versión del plugin/perfil o eliminar el marcador de migración ya no provoca wp_update_post.
+          - Reactivar el plugin tampoco sobrescribe páginas si ya existe estado de migración.
+          - Solo una reaplicación manual explícita puede volver a escribir las páginas.
+          - El botón de reaplicación advierte claramente que la operación sobrescribe contenido.
+          - Conserva Smart Hero, Nectar Slider, regla editorial, Funnels y normalización Bakery existentes.
+
+          """
+          changelog.write_text(entry + old)
+          PY
+
+          php -l "$ROOT/includes/class-sync.php"
+          php -l "$ROOT/includes/class-admin.php"
+          php -l "$ROOT/h2o-ia-site-migrator.php"
+          php -l "$ROOT/profiles/templa-design.php"
+
+          cat > "$WORK/test-editable-handoff.php" <<'PHP'
+          <?php
+          namespace {
+              define( 'ABSPATH', __DIR__ . '/' );
+              define( 'H2OSM_VERSION', '1.0.23' );
+
+              $GLOBALS['opts'] = array(
+                  'h2o_site_migrator_state' => array(
+                      'plugin_version' => '1.0.22',
+                      'profile_key' => 'templa-design',
+                      'profile_version' => '1.0.22',
+                      'managed_pages' => array( 'inicio' => 1769 ),
+                      'synced_at' => '2026-10-07T12:00:00+00:00',
+                  ),
+              );
+              $GLOBALS['page_writes'] = 0;
+
+              function get_option( $key, $default = false ) {
+                  return array_key_exists( $key, $GLOBALS['opts'] ) ? $GLOBALS['opts'][ $key ] : $default;
+              }
+              function update_option( $key, $value, $autoload = null ) {
+                  $GLOBALS['opts'][ $key ] = $value;
+                  return true;
+              }
+              function gmdate( $format ) { return '2026-10-07T16:00:00+00:00'; }
+              function wp_update_post( $postarr, $wp_error = false ) {
+                  $GLOBALS['page_writes']++;
+                  return (int) ( $postarr['ID'] ?? 0 );
+              }
+              function wp_insert_post( $postarr, $wp_error = false ) {
+                  $GLOBALS['page_writes']++;
+                  return 9999;
+              }
+          }
+
+          namespace H2O\Site_Migrator {
+              final class Registry {
+                  public static function current_profile(): array {
+                      return array(
+                          'key' => 'templa-design',
+                          'version' => '1.0.23',
+                          'pages' => array(
+                              array(
+                                  'slug' => 'inicio',
+                                  'title' => 'Inicio',
+                                  'content' => 'CONTENIDO EMPAQUETADO QUE NO DEBE SOBREESCRIBIR',
+                              ),
+                          ),
+                      );
+                  }
+              }
+          }
+
+          namespace {
+              require getenv('H2OSM_ROOT') . '/includes/class-sync.php';
+
+              \H2O\Site_Migrator\Sync::maybe_sync();
+
+              if ( 0 !== $GLOBALS['page_writes'] ) {
+                  fwrite( STDERR, "INIT_REWROTE_PAGE\n" );
+                  exit(1);
+              }
+
+              $state = $GLOBALS['opts']['h2o_site_migrator_state'];
+              if ( ( $state['plugin_version'] ?? '' ) !== '1.0.23' ) {
+                  fwrite( STDERR, "STATE_VERSION_NOT_ADVANCED\n" );
+                  exit(1);
+              }
+              if ( true !== ( $state['content_handoff'] ?? false ) || ( $state['content_owner'] ?? '' ) !== 'editor' ) {
+                  fwrite( STDERR, "HANDOFF_STATE_MISSING\n" );
+                  exit(1);
+              }
+
+              // Reactivation with an existing migration state must also be safe.
+              \H2O\Site_Migrator\Sync::activate();
+              if ( 0 !== $GLOBALS['page_writes'] ) {
+                  fwrite( STDERR, "REACTIVATION_REWROTE_PAGE\n" );
+                  exit(1);
+              }
+
+              echo "SITE_MIGRATOR_1023_EDITABLE_HANDOFF_OK\n";
+          }
+          PHP
+
+          H2OSM_ROOT="$ROOT" php "$WORK/test-editable-handoff.php"
+
+          python3 - "$ROOT/includes/class-sync.php" <<'PY'
+          import pathlib, re, sys
+          s = pathlib.Path(sys.argv[1]).read_text()
+
+          m = re.search(r'public static function maybe_sync\(\): void \{(.*?)\n    \}\n\n    public static function sync', s, re.S)
+          if not m:
+              raise SystemExit('MAYBE_SYNC_NOT_FOUND')
+          body = m.group(1)
+          if 'self::sync(' in body or 'wp_update_post' in body or 'wp_insert_post' in body:
+              raise SystemExit('MAYBE_SYNC_STILL_WRITES_CONTENT')
+
+          a = re.search(r'public static function activate\(\): void \{(.*?)\n    \}\n\n    public static function maybe_sync', s, re.S)
+          if not a:
+              raise SystemExit('ACTIVATE_NOT_FOUND')
+          if 'if ( ! empty( $state ) )' not in a.group(1):
+              raise SystemExit('REACTIVATION_GUARD_MISSING')
+
+          if "'content_owner'   => 'editor'" not in s:
+              raise SystemExit('EDITOR_HANDOFF_STATE_MISSING')
+
+          print('NO_AUTOMATIC_PAGE_TAKEOVER_OK')
+          PY
+
+          # The explicit destructive path still exists, but only behind admin action.
+          grep -Fq "Sync::sync( true )" "$ROOT/includes/class-admin.php"
+          grep -Fq "sobrescribirá las páginas migradas" "$ROOT/includes/class-admin.php"
+          grep -Fq "Reaplicar migración (sobrescribe contenido)" "$ROOT/includes/class-admin.php"
+
+          (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
+          SHA="$(sha256sum "$DIST/h2o-ia-site-migrator-$VERSION.zip" | awk '{print $1}')"
+          echo "$SHA" > "$DIST/package.sha256"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          base64 -w0 "$DIST/h2o-ia-site-migrator-$VERSION.zip" > "$DIST/package.b64"
+          split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/raw-"
+
+          python3 - "$VERSION" "$SHA" "$DIST" <<'PY'
+          import json, pathlib, sys
+          version, sha, dist = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
+          raw = sorted((dist / 'parts').glob('raw-*'))
+          parts = [
+              f'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/{version}/part-{i:02d}.b64'
+              for i in range(1, len(raw)+1)
+          ]
+          bootstrap = {
+              'version': version,
+              'package_id': 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256',
+              'package_sha256': sha,
+              'parts': parts,
+              'tested': '7.1',
+              'requires_php': '8.0',
+          }
+          release = {
+              'version': version,
+              'package_url': f'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v{version}/h2o-ia-site-migrator-{version}.zip',
+              'package_sha256': sha,
+              'tested': '7.1',
+              'requires_php': '8.0',
+          }
+          (dist / 'release-bootstrap.json').write_text(json.dumps(bootstrap, indent=2) + '\n')
+          (dist / 'release.json').write_text(json.dumps(release, indent=2) + '\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h2o-ia-site-migrator-1.0.23-tested
+          path: |
+            dist-1023/h2o-ia-site-migrator-1.0.23.zip
+            dist-1023/release.json
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          PACKAGE="dist-1023/h2o-ia-site-migrator-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PACKAGE" dist-1023/release.json --clobber
+          else
+            gh release create "$TAG" "$PACKAGE" dist-1023/release.json \
+              --target main \
+              --title "h2o IA Site Migrator $VERSION" \
+              --notes "Handoff real: las páginas migradas quedan libres para editar en WordPress/WPBakery; ninguna actualización o init vuelve a imponer contenido automáticamente."
+          fi
+
+      - name: Publish updater chunks and manifest
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          put_file () {
+            path="$1"; file="$2"; msg="$3"
+            encoded="$(base64 -w0 "$file")"
+            sha="$(gh api "repos/$REPO/contents/$path?ref=main" --jq '.sha' 2>/dev/null || true)"
+            if [ -n "$sha" ]; then
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f sha="$sha" -f branch="main" >/dev/null
+            else
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f branch="main" >/dev/null
+            fi
+          }
+
+          i=1
+          for f in $(find dist-1023/parts -type f -name 'raw-*' | sort); do
+            target="$(printf 'bootstrap/%s/part-%02d.b64' "$VERSION" "$i")"
+            put_file "$target" "$f" "Site Migrator $VERSION package part $i"
+            i=$((i+1))
+          done
+          put_file "bootstrap/package.sha256" "dist-1023/package.sha256" "Site Migrator $VERSION checksum"
+          put_file "bootstrap/release.json" "dist-1023/release-bootstrap.json" "Publish Site Migrator $VERSION updater manifest"
