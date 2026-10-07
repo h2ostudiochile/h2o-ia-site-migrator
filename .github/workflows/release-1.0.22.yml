@@ -1,0 +1,624 @@
+name: Test and release h2o IA Site Migrator 1.0.22
+
+on:
+  push:
+    branches:
+      - main
+      - fix/editorial-hero-headings-1.0.22
+    paths:
+      - '.github/workflows/release-1.0.22.yml'
+      - 'bootstrap/trigger-1.0.22.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h2o-ia-site-migrator-1.0.22-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build editorial hero intelligence 1.0.22
+        shell: bash
+        run: |
+          set -Euo pipefail
+          trap 'rc=$?; echo "FAILED line $LINENO: $BASH_COMMAND"; exit "$rc"' ERR
+
+          BASE_VERSION="1.0.21"
+          VERSION="1.0.22"
+          WORK="$RUNNER_TEMP/h2osm-$VERSION"
+          DIST="$GITHUB_WORKSPACE/dist-1022"
+
+          rm -rf "$WORK" "$DIST"
+          mkdir -p "$WORK/current" "$DIST/parts"
+
+          cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
+          unzip -q "$WORK/current.zip" -d "$WORK/current"
+          ROOT="$WORK/current/h2o-ia-site-migrator"
+
+          cat > "$ROOT/includes/class-hero-editorial.php" <<'PHP'
+          <?php
+          namespace H2O\Site_Migrator;
+
+          if ( ! defined( 'ABSPATH' ) ) {
+              exit;
+          }
+
+          /**
+           * Editorial intelligence for migrated hero sliders.
+           *
+           * Rule:
+           * if the source repeats the same hero heading across multiple images,
+           * the migration must not preserve that editorial defect. Each managed
+           * Nectar Slide receives a distinct, image-contextual heading.
+           *
+           * Context priority:
+           * 1) explicit per-site editorial hints in the migration profile;
+           * 2) attachment alt/title/caption/description;
+           * 3) image filename + slide caption;
+           * 4) safe editorial fallback in the site's language.
+           *
+           * Manual edits are preserved after the first generated result.
+           */
+          final class Hero_Editorial {
+              private const VERSION = '1';
+              private const MANAGED_META = '_h2osm_managed_hero_key';
+              private const ORIGINAL_META = '_h2osm_editorial_original_heading';
+              private const GENERATED_META = '_h2osm_editorial_generated_heading';
+              private const VERSION_META = '_h2osm_editorial_heading_version';
+
+              public static function normalize_managed_slides( array $page, array $profile ): void {
+                  $profile_key = sanitize_key( (string) ( $profile['key'] ?? 'site' ) );
+                  $page_slug = sanitize_title( (string) ( $page['slug'] ?? 'home' ) );
+                  if ( ! in_array( $page_slug, array( 'inicio', 'home', 'homepage' ), true ) ) {
+                      return;
+                  }
+
+                  $ids = get_posts(
+                      array(
+                          'post_type' => 'nectar_slider',
+                          'post_status' => array( 'publish', 'draft', 'private' ),
+                          'posts_per_page' => -1,
+                          'meta_key' => self::MANAGED_META,
+                          'meta_value' => $profile_key . ':' . $page_slug . ':',
+                          'meta_compare' => 'LIKE',
+                          'orderby' => array( 'menu_order' => 'ASC', 'ID' => 'ASC' ),
+                          'fields' => 'ids',
+                          'suppress_filters' => true,
+                      )
+                  );
+
+                  if ( count( $ids ) < 2 ) {
+                      return;
+                  }
+
+                  $slides = array();
+                  foreach ( array_values( $ids ) as $index => $id ) {
+                      $id = (int) $id;
+                      $current = trim( (string) get_post_meta( $id, '_nectar_slider_heading', true ) );
+                      $generated = trim( (string) get_post_meta( $id, self::GENERATED_META, true ) );
+                      $original = trim( (string) get_post_meta( $id, self::ORIGINAL_META, true ) );
+
+                      // A human changed the generated title afterwards: preserve it.
+                      if ( '' !== $generated && $current !== $generated && $current !== $original ) {
+                          $slides[] = array(
+                              'id' => $id,
+                              'heading' => $current,
+                              'manual' => true,
+                              'signal' => '',
+                              'index' => $index,
+                          );
+                          continue;
+                      }
+
+                      $slides[] = array(
+                          'id' => $id,
+                          'heading' => $current,
+                          'manual' => false,
+                          'signal' => self::slide_signal( $id ),
+                          'index' => $index,
+                      );
+                  }
+
+                  $rewritten = self::rewrite_repeated_headings( $slides, $profile, (string) get_locale() );
+
+                  foreach ( $rewritten as $slide ) {
+                      if ( ! empty( $slide['manual'] ) || empty( $slide['changed'] ) ) {
+                          continue;
+                      }
+
+                      $id = (int) $slide['id'];
+                      $old = trim( (string) get_post_meta( $id, '_nectar_slider_heading', true ) );
+                      $new = trim( (string) $slide['heading'] );
+                      if ( '' === $new || $new === $old ) {
+                          continue;
+                      }
+
+                      $stored_original = trim( (string) get_post_meta( $id, self::ORIGINAL_META, true ) );
+                      if ( '' === $stored_original ) {
+                          update_post_meta( $id, self::ORIGINAL_META, $old );
+                      }
+
+                      update_post_meta( $id, '_nectar_slider_heading', $new );
+                      update_post_meta( $id, self::GENERATED_META, $new );
+                      update_post_meta( $id, self::VERSION_META, self::VERSION );
+                  }
+              }
+
+              /**
+               * Pure editorial transformation used by runtime and regression tests.
+               */
+              public static function rewrite_repeated_headings( array $slides, array $profile = array(), string $locale = 'es_CL' ): array {
+                  $groups = array();
+                  foreach ( $slides as $i => $slide ) {
+                      if ( ! empty( $slide['manual'] ) ) {
+                          continue;
+                      }
+                      $key = self::normalized_heading( (string) ( $slide['heading'] ?? '' ) );
+                      if ( '' === $key ) {
+                          continue;
+                      }
+                      $groups[ $key ][] = $i;
+                  }
+
+                  $used = array();
+                  foreach ( $slides as $slide ) {
+                      if ( ! empty( $slide['manual'] ) ) {
+                          $used[ self::normalized_heading( (string) ( $slide['heading'] ?? '' ) ) ] = true;
+                      }
+                  }
+
+                  foreach ( $groups as $indices ) {
+                      if ( count( $indices ) < 2 ) {
+                          continue;
+                      }
+
+                      foreach ( $indices as $position => $slide_index ) {
+                          $slide = $slides[ $slide_index ];
+                          $hint = trim( (string) ( $profile['hero_editorial_headings'][ $slide['index'] ?? $slide_index ] ?? '' ) );
+
+                          if ( '' !== $hint ) {
+                              $candidate = $hint;
+                          } else {
+                              $candidate = self::contextual_heading(
+                                  (string) ( $slide['signal'] ?? '' ),
+                                  (int) ( $slide['index'] ?? $slide_index ),
+                                  $locale
+                              );
+                          }
+
+                          $candidate = self::ensure_unique( $candidate, $used, $locale, (int) $position );
+                          $slides[ $slide_index ]['heading'] = $candidate;
+                          $slides[ $slide_index ]['changed'] = true;
+                          $used[ self::normalized_heading( $candidate ) ] = true;
+                      }
+                  }
+
+                  return $slides;
+              }
+
+              public static function contextual_heading( string $signal, int $index, string $locale = 'es_CL' ): string {
+                  $lang = str_starts_with( strtolower( $locale ), 'en' ) ? 'en' : 'es';
+                  $normalized = remove_accents( strtolower( $signal ) );
+
+                  $category = self::category_for_signal( $normalized );
+                  $bank = self::phrase_bank( $lang );
+                  $phrases = $bank[ $category ] ?? $bank['generic'];
+                  return $phrases[ $index % count( $phrases ) ];
+              }
+
+              private static function slide_signal( int $slide_id ): string {
+                  $parts = array(
+                      (string) get_post_meta( $slide_id, '_nectar_slider_caption', true ),
+                      (string) get_post_meta( $slide_id, '_nectar_slider_image', true ),
+                  );
+
+                  $url = trim( (string) get_post_meta( $slide_id, '_nectar_slider_image', true ) );
+                  if ( '' !== $url ) {
+                      $path = (string) wp_parse_url( $url, PHP_URL_PATH );
+                      $parts[] = pathinfo( $path, PATHINFO_FILENAME );
+
+                      $attachment_id = (int) attachment_url_to_postid( $url );
+                      if ( $attachment_id > 0 ) {
+                          $parts[] = (string) get_post_meta( $attachment_id, '_wp_attachment_image_alt', true );
+                          $parts[] = (string) get_the_title( $attachment_id );
+                          $parts[] = (string) wp_get_attachment_caption( $attachment_id );
+                          $attachment = get_post( $attachment_id );
+                          if ( $attachment instanceof \WP_Post ) {
+                              $parts[] = (string) $attachment->post_excerpt;
+                              $parts[] = (string) $attachment->post_content;
+                          }
+                      }
+                  }
+
+                  return trim( preg_replace( '/\s+/u', ' ', wp_strip_all_tags( implode( ' ', array_filter( $parts ) ) ) ) );
+              }
+
+              private static function category_for_signal( string $signal ): string {
+                  $maps = array(
+                      'workplace' => array( 'oficina', 'office', 'workspace', 'workplace', 'cowork', 'escritorio', 'corporativo', 'corporate', 'meeting', 'reunion', 'colaborativ' ),
+                      'hospitality' => array( 'restaurant', 'restaurante', 'bar ', 'cafe', 'cafeter', 'hotel', 'hospitality', 'gastronom', 'comedor', 'lounge' ),
+                      'residential' => array( 'residencial', 'residential', 'vivienda', 'hogar', 'casa', 'home', 'living', 'dormitorio', 'bedroom', 'departamento', 'apartment' ),
+                      'outdoor' => array( 'terraza', 'terrace', 'patio', 'outdoor', 'exterior', 'jardin', 'garden', 'deck', 'rooftop', 'balcon', 'balcony' ),
+                      'retail' => array( 'retail', 'tienda', 'store', 'shop', 'showroom', 'vitrina', 'display' ),
+                      'kitchen' => array( 'cocina', 'kitchen' ),
+                      'bathroom' => array( 'bano', 'bathroom', 'toilette' ),
+                      'construction' => array( 'construccion', 'construction', 'obra', 'arquitectura', 'architecture', 'project', 'proyecto' ),
+                      'furniture' => array( 'mobiliario', 'furniture', 'carpinteria', 'joinery' ),
+                      'logistics' => array( 'logistica', 'logistics', 'warehouse', 'bodega', 'carga', 'cargo' ),
+                      'technology' => array( 'tecnologia', 'technology', 'tech', 'digital', 'innovation', 'innovacion' ),
+                      'education' => array( 'colegio', 'school', 'universidad', 'university', 'education', 'educacion', 'aula', 'classroom' ),
+                      'healthcare' => array( 'clinica', 'clinic', 'hospital', 'healthcare', 'salud', 'medical' ),
+                  );
+
+                  foreach ( $maps as $category => $needles ) {
+                      foreach ( $needles as $needle ) {
+                          if ( false !== strpos( $signal, $needle ) ) {
+                              return $category;
+                          }
+                      }
+                  }
+                  return 'generic';
+              }
+
+              private static function phrase_bank( string $lang ): array {
+                  if ( 'en' === $lang ) {
+                      return array(
+                          'workplace' => array(
+                              'Workspaces designed for better ideas',
+                              'Offices that make collaboration feel natural',
+                              'Environments built for how teams work today',
+                          ),
+                          'hospitality' => array(
+                              'Spaces that turn every visit into an experience',
+                              'Hospitality design that invites people to stay',
+                              'Atmospheres made for memorable encounters',
+                          ),
+                          'residential' => array(
+                              'Interiors designed for better living',
+                              'Homes where design and wellbeing meet',
+                              'Residential spaces made to be enjoyed',
+                          ),
+                          'outdoor' => array(
+                              'Design that continues outdoors',
+                              'Terraces that extend the interior experience',
+                              'Outdoor spaces made to be enjoyed',
+                          ),
+                          'retail' => array(
+                              'Brand experiences that begin with space',
+                              'Retail spaces designed to attract and connect',
+                          ),
+                          'kitchen' => array( 'Kitchens where design meets function' ),
+                          'bathroom' => array( 'Wellbeing designed down to the last detail' ),
+                          'construction' => array( 'Projects that turn ideas into real spaces' ),
+                          'furniture' => array( 'Furniture designed to complete the space' ),
+                          'logistics' => array( 'Spaces built for more efficient operations' ),
+                          'technology' => array( 'Environments ready for new ways to create' ),
+                          'education' => array( 'Spaces designed to make learning flow' ),
+                          'healthcare' => array( 'Spaces designed around care and wellbeing' ),
+                          'generic' => array(
+                              'Every space deserves its own answer',
+                              'Design shaped around how people live',
+                              'Form, function and experience in balance',
+                              'Spaces created for new ways of living',
+                          ),
+                      );
+                  }
+
+                  return array(
+                      'workplace' => array(
+                          'Espacios de trabajo que impulsan nuevas ideas',
+                          'Oficinas diseñadas para trabajar mejor',
+                          'Entornos que conectan talento y colaboración',
+                      ),
+                      'hospitality' => array(
+                          'Espacios que convierten cada visita en experiencia',
+                          'Diseño comercial que invita a quedarse',
+                          'Ambientes que hacen memorable cada encuentro',
+                      ),
+                      'residential' => array(
+                          'Interiores pensados para vivir mejor',
+                          'Hogares donde diseño y bienestar se encuentran',
+                          'Espacios residenciales hechos para disfrutarse',
+                      ),
+                      'outdoor' => array(
+                          'El diseño también se vive al aire libre',
+                          'Terrazas que extienden la experiencia del interior',
+                          'Espacios exteriores pensados para disfrutar',
+                      ),
+                      'retail' => array(
+                          'Experiencias de marca que comienzan en el espacio',
+                          'Retail diseñado para atraer y conectar',
+                      ),
+                      'kitchen' => array( 'Cocinas donde diseño y funcionalidad se encuentran' ),
+                      'bathroom' => array( 'Bienestar diseñado hasta el último detalle' ),
+                      'construction' => array( 'Proyectos que convierten ideas en espacios reales' ),
+                      'furniture' => array( 'Mobiliario diseñado para completar cada espacio' ),
+                      'logistics' => array( 'Espacios preparados para operaciones más eficientes' ),
+                      'technology' => array( 'Entornos preparados para nuevas formas de crear' ),
+                      'education' => array( 'Espacios diseñados para que aprender fluya' ),
+                      'healthcare' => array( 'Espacios pensados desde el cuidado y el bienestar' ),
+                      'generic' => array(
+                          'Cada espacio merece una respuesta propia',
+                          'Diseño pensado para la forma en que se vive',
+                          'Forma, función y experiencia en equilibrio',
+                          'Espacios que responden a nuevas maneras de habitar',
+                      ),
+                  );
+              }
+
+              private static function ensure_unique( string $candidate, array $used, string $locale, int $variant ): string {
+                  $key = self::normalized_heading( $candidate );
+                  if ( '' !== $key && ! isset( $used[ $key ] ) ) {
+                      return $candidate;
+                  }
+
+                  $generic = self::phrase_bank( str_starts_with( strtolower( $locale ), 'en' ) ? 'en' : 'es' )['generic'];
+                  foreach ( $generic as $offset => $phrase ) {
+                      $test = $generic[ ( $variant + $offset ) % count( $generic ) ];
+                      if ( ! isset( $used[ self::normalized_heading( $test ) ] ) ) {
+                          return $test;
+                      }
+                  }
+
+                  return $candidate . ' ' . ( $variant + 1 );
+              }
+
+              private static function normalized_heading( string $heading ): string {
+                  $heading = remove_accents( strtolower( wp_strip_all_tags( $heading ) ) );
+                  $heading = preg_replace( '/[^a-z0-9]+/', ' ', $heading );
+                  return trim( preg_replace( '/\s+/', ' ', (string) $heading ) );
+              }
+          }
+          PHP
+
+          python3 - "$ROOT" <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+
+          main = root / 'h2o-ia-site-migrator.php'
+          s = main.read_text()
+          s = s.replace('Version: 1.0.21', 'Version: 1.0.22')
+          s = s.replace("define( 'H2OSM_VERSION', '1.0.21' );", "define( 'H2OSM_VERSION', '1.0.22' );")
+          req = "require_once H2OSM_DIR . 'includes/class-hero-editorial.php';"
+          if req not in s:
+              needle = "require_once H2OSM_DIR . 'includes/class-smart-hero.php';"
+              if needle not in s:
+                  raise SystemExit('SMART_HERO_REQUIRE_NOT_FOUND')
+              s = s.replace(needle, needle + "\n" + req, 1)
+          main.write_text(s)
+
+          sync = root / 'includes/class-sync.php'
+          s = sync.read_text()
+          hero = "$content = Smart_Hero::upgrade_content( $content, $post, $page, $profile );"
+          editorial = "Hero_Editorial::normalize_managed_slides( $page, $profile );"
+          if editorial not in s:
+              if hero not in s:
+                  raise SystemExit('SMART_HERO_HOOK_NOT_FOUND')
+              s = s.replace(hero, hero + "\n            " + editorial, 1)
+          sync.write_text(s)
+
+          profile = root / 'profiles/templa-design.php'
+          p = profile.read_text().replace('1.0.21', '1.0.22')
+          if "'hero_editorial_headings'" not in p:
+              marker = re.search(r"('key'\s*=>\s*'templa-design'\s*,)", p)
+              if not marker:
+                  raise SystemExit('TEMPLA_PROFILE_KEY_NOT_FOUND')
+              block = """\n        'hero_editorial_headings' => array(
+              'Espacios de trabajo que impulsan nuevas ideas',
+              'Diseño comercial que invita a quedarse',
+              'Interiores pensados para vivir mejor',
+              'El diseño también se vive al aire libre',
+          ),"""
+              p = p[:marker.end()] + block + p[marker.end():]
+          profile.write_text(p)
+
+          changelog = root / 'CHANGELOG.md'
+          old = changelog.read_text() if changelog.exists() else ''
+          entry = """## 1.0.22 — 2026-10-07
+          - Nueva regla editorial global para heroes migrados.
+          - Si varios slides repiten el mismo heading, Site Migrator no hereda la repetición: genera headings distintos y contextuales por imagen.
+          - Usa señales del medio (alt, título, caption, descripción, filename y caption del slide) y contexto editorial del perfil.
+          - Incluye bancos editoriales ES/EN por contexto: oficina, comercial/hospitality, residencial, exterior, retail, cocina, salud, educación, logística y otros.
+          - Permite hints editoriales por sitio cuando la imagen no trae semántica suficiente.
+          - Preserva cualquier edición humana posterior y solo regenera títulos provenientes de la migración.
+          - Templa recibe cuatro headings editoriales distintos para sus cuatro imágenes actuales.
+
+          """
+          changelog.write_text(entry + old)
+          PY
+
+          php -l "$ROOT/includes/class-hero-editorial.php"
+          php -l "$ROOT/includes/class-sync.php"
+          php -l "$ROOT/h2o-ia-site-migrator.php"
+          php -l "$ROOT/profiles/templa-design.php"
+
+          cat > "$WORK/test-hero-editorial.php" <<'PHP'
+          <?php
+          define( 'ABSPATH', __DIR__ . '/' );
+          function sanitize_key( $v ) { return strtolower( preg_replace( '/[^a-z0-9_.-]/', '', (string) $v ) ); }
+          function sanitize_title( $v ) { return strtolower( trim( preg_replace( '/[^a-z0-9]+/i', '-', (string) $v ), '-' ) ); }
+          function wp_strip_all_tags( $v ) { return strip_tags( (string) $v ); }
+          function remove_accents( $v ) {
+              return strtr( (string) $v, array(
+                  'á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u','ñ'=>'n',
+                  'Á'=>'A','É'=>'E','Í'=>'I','Ó'=>'O','Ú'=>'U','Ñ'=>'N',
+              ) );
+          }
+
+          require getenv('H2OSM_ROOT') . '/includes/class-hero-editorial.php';
+
+          $slides = array(
+              array( 'id'=>1, 'heading'=>'Creamos entornos que inspiran', 'manual'=>false, 'signal'=>'oficina workspace escritorios colaboración', 'index'=>0 ),
+              array( 'id'=>2, 'heading'=>'Creamos entornos que inspiran', 'manual'=>false, 'signal'=>'restaurante espacio comercial hospitality comedor', 'index'=>1 ),
+              array( 'id'=>3, 'heading'=>'Creamos entornos que inspiran', 'manual'=>false, 'signal'=>'living hogar residencial vivienda', 'index'=>2 ),
+              array( 'id'=>4, 'heading'=>'Creamos entornos que inspiran', 'manual'=>false, 'signal'=>'terraza exterior outdoor deck', 'index'=>3 ),
+          );
+
+          $out = \H2O\Site_Migrator\Hero_Editorial::rewrite_repeated_headings( $slides, array(), 'es_CL' );
+          $headings = array_column( $out, 'heading' );
+          if ( count( array_unique( $headings ) ) !== 4 ) {
+              fwrite( STDERR, "HEADINGS_NOT_UNIQUE\n" . implode("\n",$headings) . "\n" );
+              exit(1);
+          }
+          if ( ! str_contains( strtolower( $headings[0] ), 'trabajo' ) && ! str_contains( strtolower( $headings[0] ), 'oficina' ) ) {
+              fwrite( STDERR, "WORKPLACE_CONTEXT_FAIL:" . $headings[0] . "\n" ); exit(1);
+          }
+          if ( ! str_contains( strtolower( $headings[1] ), 'comercial' ) && ! str_contains( strtolower( $headings[1] ), 'experiencia' ) ) {
+              fwrite( STDERR, "HOSPITALITY_CONTEXT_FAIL:" . $headings[1] . "\n" ); exit(1);
+          }
+          if ( ! str_contains( strtolower( $headings[2] ), 'vivir' ) && ! str_contains( strtolower( $headings[2] ), 'residencial' ) && ! str_contains( strtolower( $headings[2] ), 'hogar' ) ) {
+              fwrite( STDERR, "RESIDENTIAL_CONTEXT_FAIL:" . $headings[2] . "\n" ); exit(1);
+          }
+          if ( ! str_contains( strtolower( $headings[3] ), 'aire libre' ) && ! str_contains( strtolower( $headings[3] ), 'exterior' ) && ! str_contains( strtolower( $headings[3] ), 'terraza' ) ) {
+              fwrite( STDERR, "OUTDOOR_CONTEXT_FAIL:" . $headings[3] . "\n" ); exit(1);
+          }
+
+          $already_good = array(
+              array( 'id'=>10, 'heading'=>'Una oficina para crear', 'manual'=>false, 'signal'=>'office', 'index'=>0 ),
+              array( 'id'=>11, 'heading'=>'Un hogar para disfrutar', 'manual'=>false, 'signal'=>'home', 'index'=>1 ),
+          );
+          $same = \H2O\Site_Migrator\Hero_Editorial::rewrite_repeated_headings( $already_good, array(), 'es_CL' );
+          if ( $same[0]['heading'] !== 'Una oficina para crear' || $same[1]['heading'] !== 'Un hogar para disfrutar' ) {
+              fwrite( STDERR, "UNIQUE_SOURCE_HEADINGS_CHANGED\n" ); exit(1);
+          }
+
+          $profile = array(
+              'hero_editorial_headings' => array(
+                  'Frase editorial uno',
+                  'Frase editorial dos',
+                  'Frase editorial tres',
+                  'Frase editorial cuatro',
+              )
+          );
+          $hinted = \H2O\Site_Migrator\Hero_Editorial::rewrite_repeated_headings( $slides, $profile, 'es_CL' );
+          if ( $hinted[0]['heading'] !== 'Frase editorial uno' || $hinted[3]['heading'] !== 'Frase editorial cuatro' ) {
+              fwrite( STDERR, "PROFILE_HINT_FAIL\n" ); exit(1);
+          }
+
+          $manual = $slides;
+          $manual[1]['manual'] = true;
+          $manual[1]['heading'] = 'Mi título editado manualmente';
+          $preserved = \H2O\Site_Migrator\Hero_Editorial::rewrite_repeated_headings( $manual, array(), 'es_CL' );
+          if ( $preserved[1]['heading'] !== 'Mi título editado manualmente' ) {
+              fwrite( STDERR, "MANUAL_OVERRIDE_FAIL\n" ); exit(1);
+          }
+
+          echo "SITE_MIGRATOR_1022_EDITORIAL_HERO_OK\n";
+          PHP
+
+          H2OSM_ROOT="$ROOT" php "$WORK/test-hero-editorial.php"
+
+          grep -Fq "Hero_Editorial::normalize_managed_slides" "$ROOT/includes/class-sync.php"
+          grep -Fq "'hero_editorial_headings'" "$ROOT/profiles/templa-design.php"
+          grep -Fq "Espacios de trabajo que impulsan nuevas ideas" "$ROOT/profiles/templa-design.php"
+          grep -Fq "Diseño comercial que invita a quedarse" "$ROOT/profiles/templa-design.php"
+          grep -Fq "Interiores pensados para vivir mejor" "$ROOT/profiles/templa-design.php"
+          grep -Fq "El diseño también se vive al aire libre" "$ROOT/profiles/templa-design.php"
+
+          python3 - "$ROOT/includes/class-sync.php" <<'PY'
+          import pathlib, sys
+          s = pathlib.Path(sys.argv[1]).read_text()
+          a = s.index('Smart_Hero::upgrade_content')
+          b = s.index('Hero_Editorial::normalize_managed_slides')
+          c = s.index('Content_Normalizer::normalize')
+          d = s.index('Content_Validator::validate')
+          if not (a < b < c < d):
+              raise SystemExit('EDITORIAL_PIPELINE_ORDER_INVALID')
+          print('EDITORIAL_PIPELINE_ORDER_OK')
+          PY
+
+          (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
+          SHA="$(sha256sum "$DIST/h2o-ia-site-migrator-$VERSION.zip" | awk '{print $1}')"
+          echo "$SHA" > "$DIST/package.sha256"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          base64 -w0 "$DIST/h2o-ia-site-migrator-$VERSION.zip" > "$DIST/package.b64"
+          split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/raw-"
+
+          python3 - "$VERSION" "$SHA" "$DIST" <<'PY'
+          import json, pathlib, sys
+          version, sha, dist = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
+          raw = sorted((dist / 'parts').glob('raw-*'))
+          parts = [
+              f'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/{version}/part-{i:02d}.b64'
+              for i in range(1, len(raw)+1)
+          ]
+          bootstrap = {
+              'version': version,
+              'package_id': 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256',
+              'package_sha256': sha,
+              'parts': parts,
+              'tested': '7.1',
+              'requires_php': '8.0',
+          }
+          release = {
+              'version': version,
+              'package_url': f'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v{version}/h2o-ia-site-migrator-{version}.zip',
+              'package_sha256': sha,
+              'tested': '7.1',
+              'requires_php': '8.0',
+          }
+          (dist / 'release-bootstrap.json').write_text(json.dumps(bootstrap, indent=2) + '\n')
+          (dist / 'release.json').write_text(json.dumps(release, indent=2) + '\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h2o-ia-site-migrator-1.0.22-tested
+          path: |
+            dist-1022/h2o-ia-site-migrator-1.0.22.zip
+            dist-1022/release.json
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          PACKAGE="dist-1022/h2o-ia-site-migrator-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PACKAGE" dist-1022/release.json --clobber
+          else
+            gh release create "$TAG" "$PACKAGE" dist-1022/release.json \
+              --target main \
+              --title "h2o IA Site Migrator $VERSION" \
+              --notes "Regla editorial global: no heredar headings repetidos del hero; generar títulos distintos y contextuales por imagen, preservando ediciones humanas."
+          fi
+
+      - name: Publish updater chunks and manifest
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          put_file () {
+            path="$1"; file="$2"; msg="$3"
+            encoded="$(base64 -w0 "$file")"
+            sha="$(gh api "repos/$REPO/contents/$path?ref=main" --jq '.sha' 2>/dev/null || true)"
+            if [ -n "$sha" ]; then
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f sha="$sha" -f branch="main" >/dev/null
+            else
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f branch="main" >/dev/null
+            fi
+          }
+
+          i=1
+          for f in $(find dist-1022/parts -type f -name 'raw-*' | sort); do
+            target="$(printf 'bootstrap/%s/part-%02d.b64' "$VERSION" "$i")"
+            put_file "$target" "$f" "Site Migrator $VERSION package part $i"
+            i=$((i+1))
+          done
+          put_file "bootstrap/package.sha256" "dist-1022/package.sha256" "Site Migrator $VERSION checksum"
+          put_file "bootstrap/release.json" "dist-1022/release-bootstrap.json" "Publish Site Migrator $VERSION updater manifest"
