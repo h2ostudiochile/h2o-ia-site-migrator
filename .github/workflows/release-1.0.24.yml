@@ -1,0 +1,849 @@
+name: Test and release h2o IA Site Migrator 1.0.24
+
+on:
+  push:
+    branches:
+      - main
+      - fix/global-footer-funnel-1.0.24
+    paths:
+      - '.github/workflows/release-1.0.24.yml'
+      - 'bootstrap/trigger-1.0.24.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h2o-ia-site-migrator-1.0.24-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native global footer migration 1.0.24
+        shell: bash
+        run: |
+          set -Euo pipefail
+          trap 'rc=$?; echo "FAILED line $LINENO: $BASH_COMMAND"; exit "$rc"' ERR
+
+          BASE_VERSION="1.0.23"
+          VERSION="1.0.24"
+          WORK="$RUNNER_TEMP/h2osm-$VERSION"
+          DIST="$GITHUB_WORKSPACE/dist-1024"
+
+          rm -rf "$WORK" "$DIST"
+          mkdir -p "$WORK/current" "$DIST/parts"
+
+          cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
+          unzip -q "$WORK/current.zip" -d "$WORK/current"
+          ROOT="$WORK/current/h2o-ia-site-migrator"
+
+          cat > "$ROOT/includes/class-global-footer.php" <<'PHP'
+          <?php
+          namespace H2O\Site_Migrator;
+
+          if ( ! defined( 'ABSPATH' ) ) {
+              exit;
+          }
+
+          /**
+           * Canonical migration rule for site-wide closing CTA sections.
+           *
+           * A footer-like CTA must not remain duplicated inside page content.
+           * It becomes a native Salient Global Section, assigned to:
+           *   Location: Footer (nectar_hook_global_section_footer)
+           *   Condition: Everywhere
+           *
+           * The section hosts the public Funnel consumer using the
+           * initial_evaluation context. Existing manually-assigned Global
+           * Sections at Footer are never overwritten.
+           */
+          final class Global_Footer {
+              private const STATE_OPTION = 'h2osm_global_footer_v1';
+              private const MANAGED_META = '_h2osm_managed_global_footer_key';
+              private const INITIALIZED_META = '_h2osm_global_footer_initialized';
+              private const LOCATION = 'nectar_hook_global_section_footer';
+              private const FUNNEL_CONTEXT = 'initial_evaluation';
+
+              public static function register(): void {
+                  add_action( 'admin_init', array( __CLASS__, 'maybe_upgrade_existing' ), 1250 );
+              }
+
+              public static function prepare_content( string $content, array $page, array $profile ): string {
+                  if ( ! post_type_exists( 'salient_g_sections' ) ) {
+                      return $content;
+                  }
+
+                  $candidate = self::find_footer_candidate( $content );
+                  if ( ! is_array( $candidate ) ) {
+                      return $content;
+                  }
+
+                  $row = (string) $candidate['row'];
+                  $section_content = self::build_section_content( $row, $profile );
+                  $section_id = self::ensure_global_section( $section_content, $profile );
+
+                  if ( is_wp_error( $section_id ) ) {
+                      return $content;
+                  }
+
+                  return trim( substr_replace(
+                      $content,
+                      '',
+                      (int) $candidate['offset'],
+                      strlen( $row )
+                  ) );
+              }
+
+              public static function maybe_upgrade_existing(): void {
+                  if ( ! current_user_can( 'manage_options' ) ) {
+                      return;
+                  }
+
+                  $state = get_option( self::STATE_OPTION, array() );
+                  if ( is_array( $state ) && 'completed' === (string) ( $state['status'] ?? '' ) ) {
+                      return;
+                  }
+
+                  if ( ! post_type_exists( 'salient_g_sections' ) ) {
+                      return;
+                  }
+
+                  $profile = Registry::current_profile();
+                  if ( ! is_array( $profile ) ) {
+                      return;
+                  }
+
+                  $content = self::profile_footer_content( $profile );
+                  if ( '' === $content ) {
+                      return;
+                  }
+
+                  $section_id = self::ensure_global_section( $content, $profile );
+                  if ( is_wp_error( $section_id ) ) {
+                      update_option(
+                          self::STATE_OPTION,
+                          array(
+                              'status' => 'conflict',
+                              'error' => $section_id->get_error_code(),
+                              'message' => $section_id->get_error_message(),
+                              'updated_at' => gmdate( 'c' ),
+                          ),
+                          false
+                      );
+                      return;
+                  }
+
+                  $removed = 0;
+                  foreach ( Sync::managed_page_ids() as $page_id ) {
+                      $post = get_post( $page_id );
+                      if ( ! $post instanceof \WP_Post || 'page' !== $post->post_type ) {
+                          continue;
+                      }
+
+                      $original = (string) $post->post_content;
+                      $cleaned = self::remove_legacy_managed_footer( $original );
+                      if ( $cleaned === $original ) {
+                          continue;
+                      }
+
+                      $result = wp_update_post(
+                          wp_slash(
+                              array(
+                                  'ID' => (int) $post->ID,
+                                  'post_content' => $cleaned,
+                              )
+                          ),
+                          true
+                      );
+                      if ( ! is_wp_error( $result ) ) {
+                          $removed++;
+                      }
+                  }
+
+                  update_option(
+                      self::STATE_OPTION,
+                      array(
+                          'status' => 'completed',
+                          'global_section_id' => (int) $section_id,
+                          'location' => self::LOCATION,
+                          'condition' => 'everywhere',
+                          'funnel_context' => self::FUNNEL_CONTEXT,
+                          'legacy_rows_removed' => $removed,
+                          'updated_at' => gmdate( 'c' ),
+                      ),
+                      false
+                  );
+              }
+
+              public static function find_footer_candidate( string $content ): ?array {
+                  if ( '' === trim( $content ) ) {
+                      return null;
+                  }
+
+                  if ( ! preg_match_all(
+                      '/\[vc_row\b[^\]]*\](?:(?!\[vc_row\b).)*?\[\/vc_row\]/is',
+                      $content,
+                      $matches,
+                      PREG_OFFSET_CAPTURE
+                  ) ) {
+                      return null;
+                  }
+
+                  $candidates = array();
+                  $total = strlen( $content );
+                  foreach ( $matches[0] as $match ) {
+                      $row = (string) $match[0];
+                      $offset = (int) $match[1];
+                      $text = self::normalized_text( $row );
+
+                      $score = 0;
+                      foreach ( array(
+                          'footer', 'contacto', 'contactanos', 'conversemos',
+                          'hablemos', 'cotiza', 'cotizar', 'agenda', 'empecemos',
+                          'proximo', 'proyecto', 'transformar', 'cuentanos',
+                      ) as $needle ) {
+                          if ( false !== strpos( $text, $needle ) ) {
+                              $score += 2;
+                          }
+                      }
+
+                      if ( false !== strpos( strtolower( $row ), 'h2osm-cta-row' ) ) {
+                          $score += 5;
+                      }
+                      if ( $offset > (int) ( $total * 0.65 ) ) {
+                          $score += 2;
+                      }
+                      if (
+                          false !== strpos( strtolower( $row ), 'full_width_background' ) ||
+                          false !== strpos( strtolower( $row ), 'full_width_content' )
+                      ) {
+                          $score += 1;
+                      }
+
+                      if ( $score >= 5 ) {
+                          $candidates[] = array(
+                              'row' => $row,
+                              'offset' => $offset,
+                              'score' => $score,
+                          );
+                      }
+                  }
+
+                  if ( empty( $candidates ) ) {
+                      return null;
+                  }
+
+                  usort(
+                      $candidates,
+                      static function ( array $a, array $b ): int {
+                          $score = (int) $b['score'] <=> (int) $a['score'];
+                          return 0 !== $score ? $score : (int) $b['offset'] <=> (int) $a['offset'];
+                      }
+                  );
+
+                  return $candidates[0];
+              }
+
+              private static function ensure_global_section( string $content, array $profile ): int|\WP_Error {
+                  $profile_key = sanitize_key( (string) ( $profile['key'] ?? 'site' ) );
+                  $managed_key = $profile_key . ':footer';
+
+                  $foreign = self::find_foreign_footer();
+                  if ( $foreign > 0 ) {
+                      return new \WP_Error(
+                          'h2osm_footer_location_in_use',
+                          'Ya existe una Global Section manual asignada al Footer. Site Migrator no la reemplazó.',
+                          array( 'global_section_id' => $foreign )
+                      );
+                  }
+
+                  $existing = get_posts(
+                      array(
+                          'post_type' => 'salient_g_sections',
+                          'post_status' => array( 'publish', 'draft', 'private' ),
+                          'posts_per_page' => 1,
+                          'meta_key' => self::MANAGED_META,
+                          'meta_value' => $managed_key,
+                          'fields' => 'ids',
+                          'suppress_filters' => true,
+                      )
+                  );
+
+                  if ( ! empty( $existing ) ) {
+                      $section_id = (int) $existing[0];
+
+                      // Once created, the Global Section also belongs to the editor.
+                      // Do not overwrite later human edits.
+                      if ( ! get_post_meta( $section_id, self::INITIALIZED_META, true ) ) {
+                          wp_update_post(
+                              wp_slash(
+                                  array(
+                                      'ID' => $section_id,
+                                      'post_content' => $content,
+                                      'post_status' => 'publish',
+                                  )
+                              )
+                          );
+                          update_post_meta( $section_id, self::INITIALIZED_META, '1' );
+                      }
+
+                      self::assign_footer_everywhere( $section_id );
+                      return $section_id;
+                  }
+
+                  $title = sanitize_text_field(
+                      (string) (
+                          $profile['global_footer']['title']
+                          ?? 'Footer — ' . ( $profile['key'] ?? 'Sitio' )
+                      )
+                  );
+
+                  $section_id = wp_insert_post(
+                      wp_slash(
+                          array(
+                              'post_type' => 'salient_g_sections',
+                              'post_status' => 'publish',
+                              'post_title' => $title,
+                              'post_content' => $content,
+                          )
+                      ),
+                      true
+                  );
+
+                  if ( is_wp_error( $section_id ) ) {
+                      return $section_id;
+                  }
+
+                  $section_id = (int) $section_id;
+                  update_post_meta( $section_id, self::MANAGED_META, $managed_key );
+                  update_post_meta( $section_id, self::INITIALIZED_META, '1' );
+                  self::assign_footer_everywhere( $section_id );
+
+                  return $section_id;
+              }
+
+              private static function assign_footer_everywhere( int $section_id ): void {
+                  update_post_meta(
+                      $section_id,
+                      'nectar_g_section_locations',
+                      array(
+                          array(
+                              'key' => 'h2osm-footer-location',
+                              'options' => array(
+                                  array( 'type' => 'priority', 'value' => '10' ),
+                                  array( 'type' => 'location', 'value' => self::LOCATION ),
+                              ),
+                          ),
+                      )
+                  );
+
+                  update_post_meta(
+                      $section_id,
+                      'nectar_g_section_conditions',
+                      array(
+                          array(
+                              'key' => 'h2osm-footer-everywhere',
+                              'options' => array(
+                                  array( 'type' => 'include', 'value' => 'include' ),
+                                  array( 'type' => 'condition', 'value' => 'everywhere' ),
+                              ),
+                          ),
+                      )
+                  );
+
+                  update_post_meta(
+                      $section_id,
+                      'nectar_g_section_conditions_operator',
+                      array( 'and' )
+                  );
+              }
+
+              private static function find_foreign_footer(): int {
+                  $sections = get_posts(
+                      array(
+                          'post_type' => 'salient_g_sections',
+                          'post_status' => 'publish',
+                          'posts_per_page' => -1,
+                          'fields' => 'ids',
+                          'suppress_filters' => true,
+                      )
+                  );
+
+                  foreach ( $sections as $section_id ) {
+                      $section_id = (int) $section_id;
+                      if ( '' !== (string) get_post_meta( $section_id, self::MANAGED_META, true ) ) {
+                          continue;
+                      }
+
+                      $locations = get_post_meta( $section_id, 'nectar_g_section_locations', true );
+                      if ( ! is_array( $locations ) ) {
+                          continue;
+                      }
+
+                      foreach ( $locations as $location ) {
+                          $location = (array) $location;
+                          foreach ( (array) ( $location['options'] ?? array() ) as $option ) {
+                              $option = (array) $option;
+                              if (
+                                  'location' === (string) ( $option['type'] ?? '' ) &&
+                                  self::LOCATION === (string) ( $option['value'] ?? '' )
+                              ) {
+                                  return $section_id;
+                              }
+                          }
+                      }
+                  }
+
+                  return 0;
+              }
+
+              private static function build_section_content( string $source_row, array $profile ): string {
+                  $configured = self::profile_footer_content( $profile );
+                  if ( '' !== $configured ) {
+                      return $configured;
+                  }
+
+                  $row = $source_row;
+                  if ( false === strpos( $row, '[h2osm_funnel ' ) ) {
+                      $row = preg_replace(
+                          '/\[\/vc_column\](\s*\[\/vc_row\])\s*$/i',
+                          '[h2osm_funnel context="' . self::FUNNEL_CONTEXT . '"][/vc_column]$1',
+                          $row,
+                          1
+                      );
+                  }
+
+                  return (string) $row;
+              }
+
+              private static function profile_footer_content( array $profile ): string {
+                  $config = $profile['global_footer'] ?? null;
+                  if ( ! is_array( $config ) ) {
+                      return '';
+                  }
+
+                  $eyebrow = sanitize_text_field( (string) ( $config['eyebrow'] ?? '' ) );
+                  $heading = sanitize_text_field( (string) ( $config['heading'] ?? '' ) );
+                  $background = sanitize_hex_color( (string) ( $config['background_color'] ?? '' ) ) ?: '#FFC300';
+                  $context = sanitize_key( (string) ( $config['funnel_context'] ?? self::FUNNEL_CONTEXT ) );
+                  if ( '' === $heading ) {
+                      return '';
+                  }
+
+                  return '[vc_row type="full_width_background" el_class="h2osm-global-footer h2osm-bg-row" '
+                      . 'full_screen_row_position="middle" scene_position="center" text_color="dark" text_align="left" '
+                      . 'row_border_radius="none" overflow="visible" bg_color="' . esc_attr( $background ) . '" '
+                      . 'top_padding="6%" bottom_padding="6%"]'
+                      . '[vc_column width="1/1" column_padding="no-extra-padding"]'
+                      . '[vc_column_text]<section class="h2osm-cta">'
+                      . ( '' !== $eyebrow ? '<p class="h2osm-eyebrow">' . esc_html( $eyebrow ) . '</p>' : '' )
+                      . '<h2>' . esc_html( $heading ) . '</h2>'
+                      . '</section>[/vc_column_text]'
+                      . '[h2osm_funnel context="' . esc_attr( $context ) . '"]'
+                      . '[/vc_column][/vc_row]';
+              }
+
+              private static function remove_legacy_managed_footer( string $content ): string {
+                  $candidate = self::find_footer_candidate( $content );
+                  if ( ! is_array( $candidate ) ) {
+                      return $content;
+                  }
+
+                  $row = (string) $candidate['row'];
+                  $normalized = self::normalized_text( $row );
+
+                  // Existing live-site correction is intentionally narrow:
+                  // only the legacy CTA created by Site Migrator is removed.
+                  if (
+                      false === strpos( strtolower( $row ), 'h2osm-cta-row' ) ||
+                      false === strpos( $normalized, 'tu proximo espacio' ) ||
+                      false === strpos( $normalized, 'conversemos' )
+                  ) {
+                      return $content;
+                  }
+
+                  return trim( substr_replace(
+                      $content,
+                      '',
+                      (int) $candidate['offset'],
+                      strlen( $row )
+                  ) );
+              }
+
+              private static function normalized_text( string $value ): string {
+                  $value = remove_accents( strtolower( wp_strip_all_tags( $value ) ) );
+                  $value = preg_replace( '/[^a-z0-9]+/', ' ', $value );
+                  return trim( preg_replace( '/\s+/', ' ', (string) $value ) );
+              }
+          }
+          PHP
+
+          python3 - "$ROOT" <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+
+          main = root / 'h2o-ia-site-migrator.php'
+          s = main.read_text()
+          s = s.replace('Version: 1.0.23', 'Version: 1.0.24')
+          s = s.replace("define( 'H2OSM_VERSION', '1.0.23' );", "define( 'H2OSM_VERSION', '1.0.24' );")
+          req = "require_once H2OSM_DIR . 'includes/class-global-footer.php';"
+          if req not in s:
+              needle = "require_once H2OSM_DIR . 'includes/class-content-normalizer.php';"
+              if needle not in s:
+                  raise SystemExit('NORMALIZER_REQUIRE_NOT_FOUND')
+              s = s.replace(needle, needle + "\n" + req, 1)
+          call = r"\H2O\Site_Migrator\Global_Footer::register();"
+          if call not in s:
+              s += "\n" + call + "\n"
+          main.write_text(s)
+
+          # Future migrations: extract footer candidate before normalizing/validating page content.
+          sync = root / 'includes/class-sync.php'
+          s = sync.read_text()
+          needle = "$content = Content_Normalizer::normalize( $content );"
+          hook = "$content = Global_Footer::prepare_content( $content, $page, $profile );"
+          if hook not in s:
+              if needle not in s:
+                  raise SystemExit('NORMALIZER_HOOK_NOT_FOUND')
+              s = s.replace(needle, hook + "\n            " + needle, 1)
+          sync.write_text(s)
+
+          # Funnel resolver: add canonical Evaluación inicial context.
+          funnels = root / 'includes/class-funnels.php'
+          s = funnels.read_text()
+          s = s.replace(
+              "array( 'corporate', 'residential', 'contact' )",
+              "array( 'corporate', 'residential', 'contact', 'initial_evaluation' )"
+          )
+          marker = """                  if ( 'contact' === $context ) {
+          """
+          branch = """                  if ( 'initial_evaluation' === $context ) {
+                      if ( 'evaluacion inicial' === $key || 'evaluacion inicial' === $name ) {
+                          return 1100;
+                      }
+                      return self::keyword_score(
+                          array( 'evaluacion inicial', 'evaluacion', 'diagnostico inicial', 'assessment' ),
+                          $key,
+                          $category,
+                          $name
+                      );
+                  }
+
+          """
+          if branch.strip() not in s:
+              if marker not in s:
+                  raise SystemExit('FUNNEL_SCORE_MARKER_NOT_FOUND')
+              s = s.replace(marker, branch + marker, 1)
+          funnels.write_text(s)
+
+          # Templa profile: remove the old page-local CTA and define the canonical Global Footer.
+          profile = root / 'profiles/templa-design.php'
+          p = profile.read_text().replace('1.0.23', '1.0.24')
+          p = re.sub(
+              r'^\[vc_row[^\n]*el_class="h2osm-cta-row h2osm-bg-row"[^\n]*Tu próximo espacio[^\n]*\[/vc_row\]\s*$',
+              '',
+              p,
+              flags=re.M,
+          )
+
+          if "'global_footer'" not in p:
+              key_marker = re.search(r"('key'\s*=>\s*'templa-design'\s*,)", p)
+              if not key_marker:
+                  raise SystemExit('TEMPLA_PROFILE_KEY_NOT_FOUND')
+              block = """
+              'global_footer' => array(
+                  'title' => 'Footer — Templa Design',
+                  'eyebrow' => 'Tu próximo espacio',
+                  'heading' => 'Conversemos sobre lo que quieres transformar.',
+                  'background_color' => '#FFC300',
+                  'funnel_context' => 'initial_evaluation',
+              ),"""
+              p = p[:key_marker.end()] + block + p[key_marker.end():]
+          profile.write_text(p)
+
+          changelog = root / 'CHANGELOG.md'
+          old = changelog.read_text() if changelog.exists() else ''
+          entry = """## 1.0.24 — 2026-10-07
+          - Nueva regla global: un cierre/CTA identificado como footer se extrae del contenido de página y se convierte en Salient Global Section.
+          - Asigna la Global Section nativamente a Footer / Everywhere mediante nectar_g_section_locations y condiciones de Salient.
+          - Inserta el Funnel Evaluación inicial mediante el consumidor HTTP público de Funnels.
+          - Añade el contexto initial_evaluation al resolvedor del catálogo público; resuelve por public_key/nombre, nunca por ID interno.
+          - No reemplaza una Global Section manual ya asignada al Footer.
+          - La Global Section creada queda entregada al editor; actualizaciones posteriores no pisan cambios humanos.
+          - Templa: mueve únicamente la fila heredada “Tu próximo espacio / Conversemos…” sin resincronizar ni reemplazar el resto de Inicio.
+          - Reaplicar migración en el futuro tampoco volverá a incrustar esa CTA dentro de Inicio.
+
+          """
+          changelog.write_text(entry + old)
+          PY
+
+          php -l "$ROOT/includes/class-global-footer.php"
+          php -l "$ROOT/includes/class-funnels.php"
+          php -l "$ROOT/includes/class-sync.php"
+          php -l "$ROOT/h2o-ia-site-migrator.php"
+          php -l "$ROOT/profiles/templa-design.php"
+
+          cat > "$WORK/test-global-footer.php" <<'PHP'
+          <?php
+          namespace {
+              define( 'ABSPATH', __DIR__ . '/' );
+
+              $GLOBALS['opts'] = array();
+              $GLOBALS['meta'] = array();
+              $GLOBALS['posts'] = array();
+              $GLOBALS['next_id'] = 200;
+              $GLOBALS['managed_pages'] = array();
+
+              class WP_Error {
+                  public function __construct(private string $code, private string $message='', private $data=null) {}
+                  public function get_error_code(){ return $this->code; }
+                  public function get_error_message(){ return $this->message; }
+                  public function get_error_data(){ return $this->data; }
+              }
+              class WP_Post {
+                  public int $ID;
+                  public string $post_type='page';
+                  public string $post_status='publish';
+                  public string $post_content='';
+                  public string $post_title='';
+                  public function __construct($id,$type='page',$content='',$title=''){
+                      $this->ID=$id; $this->post_type=$type; $this->post_content=$content; $this->post_title=$title;
+                  }
+              }
+
+              function add_action(...$x){}
+              function current_user_can($c){ return true; }
+              function post_type_exists($t){ return 'salient_g_sections' === $t; }
+              function sanitize_key($v){ return strtolower(preg_replace('/[^a-z0-9_.-]/','',(string)$v)); }
+              function sanitize_text_field($v){ return trim(strip_tags((string)$v)); }
+              function sanitize_hex_color($v){ return preg_match('/^#[0-9a-f]{6}$/i',(string)$v)?strtoupper((string)$v):''; }
+              function esc_attr($v){ return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8'); }
+              function esc_html($v){ return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8'); }
+              function wp_strip_all_tags($v){ return strip_tags((string)$v); }
+              function remove_accents($v){ return strtr((string)$v,['ó'=>'o','í'=>'i','á'=>'a','é'=>'e','ú'=>'u','ñ'=>'n']); }
+              function gmdate($f){ return '2026-10-07T17:00:00+00:00'; }
+              function wp_slash($v){ return $v; }
+              function is_wp_error($v){ return $v instanceof WP_Error; }
+
+              function get_option($k,$d=false){ return $GLOBALS['opts'][$k]??$d; }
+              function update_option($k,$v,$autoload=null){ $GLOBALS['opts'][$k]=$v; return true; }
+
+              function get_post_meta($id,$key,$single=true){ return $GLOBALS['meta'][$id][$key]??''; }
+              function update_post_meta($id,$key,$value){ $GLOBALS['meta'][$id][$key]=$value; return true; }
+
+              function get_post($id){ return $GLOBALS['posts'][$id]??null; }
+              function get_posts($args){
+                  $ids=[];
+                  foreach($GLOBALS['posts'] as $id=>$post){
+                      if(($args['post_type']??'')!==$post->post_type) continue;
+                      if(isset($args['meta_key'])){
+                          $mv=$GLOBALS['meta'][$id][$args['meta_key']]??null;
+                          if((string)$mv!==(string)($args['meta_value']??'')) continue;
+                      }
+                      $ids[]=(int)$id;
+                  }
+                  if(($args['posts_per_page']??-1)===1) $ids=array_slice($ids,0,1);
+                  if(($args['fields']??'')==='ids') return $ids;
+                  return array_map(fn($id)=>$GLOBALS['posts'][$id],$ids);
+              }
+              function wp_insert_post($arr,$err=false){
+                  $id=++$GLOBALS['next_id'];
+                  $p=new WP_Post($id,$arr['post_type']??'page',$arr['post_content']??'',$arr['post_title']??'');
+                  $p->post_status=$arr['post_status']??'publish';
+                  $GLOBALS['posts'][$id]=$p;
+                  return $id;
+              }
+              function wp_update_post($arr,$err=false){
+                  $id=(int)$arr['ID'];
+                  if(!isset($GLOBALS['posts'][$id])) return new WP_Error('missing','missing');
+                  if(isset($arr['post_content'])) $GLOBALS['posts'][$id]->post_content=$arr['post_content'];
+                  if(isset($arr['post_status'])) $GLOBALS['posts'][$id]->post_status=$arr['post_status'];
+                  return $id;
+              }
+          }
+
+          namespace H2O\Site_Migrator {
+              final class Registry {
+                  public static function current_profile(): array {
+                      return array(
+                          'key'=>'templa-design',
+                          'global_footer'=>array(
+                              'title'=>'Footer — Templa Design',
+                              'eyebrow'=>'Tu próximo espacio',
+                              'heading'=>'Conversemos sobre lo que quieres transformar.',
+                              'background_color'=>'#FFC300',
+                              'funnel_context'=>'initial_evaluation',
+                          ),
+                      );
+                  }
+              }
+              final class Sync {
+                  public static function managed_page_ids(): array { return $GLOBALS['managed_pages']; }
+              }
+          }
+
+          namespace {
+              require getenv('H2OSM_ROOT').'/includes/class-global-footer.php';
+
+              $legacy='[vc_row type="full_width_background"][vc_column][vc_column_text]<p>Contenido editado manualmente que debe sobrevivir.</p>[/vc_column_text][/vc_column][/vc_row]'
+                  .'[vc_row type="full_width_background" el_class="h2osm-cta-row h2osm-bg-row" bg_color="#FFC300"][vc_column][vc_column_text]<section class="h2osm-cta"><p>Tu próximo espacio</p><h2>Conversemos sobre lo que quieres transformar.</h2><a href="/contacto/">Hablemos</a></section>[/vc_column_text][/vc_column][/vc_row]';
+
+              $GLOBALS['posts'][100]=new WP_Post(100,'page',$legacy,'Inicio');
+              $GLOBALS['managed_pages']=[100];
+
+              \H2O\Site_Migrator\Global_Footer::maybe_upgrade_existing();
+
+              $state=$GLOBALS['opts']['h2osm_global_footer_v1']??array();
+              if(($state['status']??'')!=='completed'){fwrite(STDERR,"STATE_FAIL\n");exit(1);}
+              $sid=(int)($state['global_section_id']??0);
+              if($sid<=0 || !isset($GLOBALS['posts'][$sid])){fwrite(STDERR,"SECTION_CREATE_FAIL\n");exit(1);}
+
+              $section=$GLOBALS['posts'][$sid]->post_content;
+              if(!str_contains($section,'Tu próximo espacio') || !str_contains($section,'[h2osm_funnel context="initial_evaluation"]')){
+                  fwrite(STDERR,"SECTION_CONTENT_FAIL\n");exit(1);
+              }
+
+              $locations=$GLOBALS['meta'][$sid]['nectar_g_section_locations']??array();
+              $flat=json_encode($locations);
+              if(!str_contains($flat,'nectar_hook_global_section_footer')){
+                  fwrite(STDERR,"FOOTER_LOCATION_FAIL\n");exit(1);
+              }
+              $conditions=json_encode($GLOBALS['meta'][$sid]['nectar_g_section_conditions']??array());
+              if(!str_contains($conditions,'everywhere')){
+                  fwrite(STDERR,"EVERYWHERE_FAIL\n");exit(1);
+              }
+
+              $page=$GLOBALS['posts'][100]->post_content;
+              if(!str_contains($page,'Contenido editado manualmente que debe sobrevivir.')){
+                  fwrite(STDERR,"MANUAL_PAGE_EDIT_LOST\n");exit(1);
+              }
+              if(str_contains($page,'Tu próximo espacio')){
+                  fwrite(STDERR,"LEGACY_FOOTER_NOT_REMOVED\n");exit(1);
+              }
+
+              // Future migration path: identifies a terminal CTA, moves it to GS.
+              $future='[vc_row][vc_column][vc_column_text]<p>Contenido</p>[/vc_column_text][/vc_column][/vc_row]'
+                  .'[vc_row type="full_width_background"][vc_column][vc_column_text]<h2>Hablemos de tu próximo proyecto</h2><p>Conversemos</p>[/vc_column_text][/vc_column][/vc_row]';
+              $candidate=\H2O\Site_Migrator\Global_Footer::find_footer_candidate($future);
+              if(!is_array($candidate)){fwrite(STDERR,"GENERIC_DETECTION_FAIL\n");exit(1);}
+
+              // Manual foreign footer conflict must fail closed.
+              $GLOBALS['posts'][999]=new WP_Post(999,'salient_g_sections','manual','Manual Footer');
+              $GLOBALS['meta'][999]['nectar_g_section_locations']=[
+                  ['options'=>[['type'=>'location','value'=>'nectar_hook_global_section_footer']]]
+              ];
+              $before=$GLOBALS['posts'][100]->post_content;
+              unset($GLOBALS['opts']['h2osm_global_footer_v1']);
+              // Existing managed footer still means no foreign takeover in normal run;
+              // remove its location to isolate conflict test.
+              $GLOBALS['meta'][$sid]['nectar_g_section_locations']=[];
+              \H2O\Site_Migrator\Global_Footer::maybe_upgrade_existing();
+              $conflict=$GLOBALS['opts']['h2osm_global_footer_v1']??array();
+              if(($conflict['status']??'')!=='conflict'){fwrite(STDERR,"MANUAL_FOOTER_CONFLICT_FAIL\n");exit(1);}
+              if($GLOBALS['posts'][100]->post_content!==$before){fwrite(STDERR,"CONFLICT_TOUCHED_PAGE\n");exit(1);}
+
+              echo "SITE_MIGRATOR_1024_GLOBAL_FOOTER_OK\n";
+          }
+          PHP
+
+          H2OSM_ROOT="$ROOT" php "$WORK/test-global-footer.php"
+
+          # Funnel context and architecture checks.
+          grep -Fq "'initial_evaluation'" "$ROOT/includes/class-funnels.php"
+          grep -Fq "'evaluacion inicial'" "$ROOT/includes/class-funnels.php"
+          grep -Fq "h2o.funnels.resources/v1" "$ROOT/includes/class-funnels.php"
+          ! grep -Fq "H2OFM_" "$ROOT/includes/class-global-footer.php"
+
+          # Profile must no longer embed the legacy CTA row in Inicio.
+          ! grep -Fq 'el_class="h2osm-cta-row h2osm-bg-row"' "$ROOT/profiles/templa-design.php"
+          grep -Fq "'global_footer'" "$ROOT/profiles/templa-design.php"
+          grep -Fq "'funnel_context' => 'initial_evaluation'" "$ROOT/profiles/templa-design.php"
+
+          # Future sync pipeline must extract footer before normalizer/validator.
+          python3 - "$ROOT/includes/class-sync.php" <<'PY'
+          import pathlib,sys
+          s=pathlib.Path(sys.argv[1]).read_text()
+          a=s.index('Global_Footer::prepare_content')
+          b=s.index('Content_Normalizer::normalize')
+          c=s.index('Content_Validator::validate')
+          if not (a < b < c):
+              raise SystemExit('GLOBAL_FOOTER_PIPELINE_ORDER_INVALID')
+          print('GLOBAL_FOOTER_PIPELINE_ORDER_OK')
+          PY
+
+          (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
+          SHA="$(sha256sum "$DIST/h2o-ia-site-migrator-$VERSION.zip" | awk '{print $1}')"
+          echo "$SHA" > "$DIST/package.sha256"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          base64 -w0 "$DIST/h2o-ia-site-migrator-$VERSION.zip" > "$DIST/package.b64"
+          split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/raw-"
+
+          python3 - "$VERSION" "$SHA" "$DIST" <<'PY'
+          import json,pathlib,sys
+          version,sha,dist=sys.argv[1],sys.argv[2],pathlib.Path(sys.argv[3])
+          raw=sorted((dist/'parts').glob('raw-*'))
+          parts=[f'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/{version}/part-{i:02d}.b64' for i in range(1,len(raw)+1)]
+          bootstrap={'version':version,'package_id':'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256','package_sha256':sha,'parts':parts,'tested':'7.1','requires_php':'8.0'}
+          release={'version':version,'package_url':f'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v{version}/h2o-ia-site-migrator-{version}.zip','package_sha256':sha,'tested':'7.1','requires_php':'8.0'}
+          (dist/'release-bootstrap.json').write_text(json.dumps(bootstrap,indent=2)+'\n')
+          (dist/'release.json').write_text(json.dumps(release,indent=2)+'\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h2o-ia-site-migrator-1.0.24-tested
+          path: |
+            dist-1024/h2o-ia-site-migrator-1.0.24.zip
+            dist-1024/release.json
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          PACKAGE="dist-1024/h2o-ia-site-migrator-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PACKAGE" dist-1024/release.json --clobber
+          else
+            gh release create "$TAG" "$PACKAGE" dist-1024/release.json \
+              --target main \
+              --title "h2o IA Site Migrator $VERSION" \
+              --notes "Regla global de footer: CTA final -> Salient Global Section nativa en Footer/Everywhere con Funnel Evaluación inicial, preservando ediciones humanas y footers manuales."
+          fi
+
+      - name: Publish updater chunks and manifest
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          put_file () {
+            path="$1"; file="$2"; msg="$3"
+            encoded="$(base64 -w0 "$file")"
+            sha="$(gh api "repos/$REPO/contents/$path?ref=main" --jq '.sha' 2>/dev/null || true)"
+            if [ -n "$sha" ]; then
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f sha="$sha" -f branch="main" >/dev/null
+            else
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f branch="main" >/dev/null
+            fi
+          }
+          i=1
+          for f in $(find dist-1024/parts -type f -name 'raw-*' | sort); do
+            target="$(printf 'bootstrap/%s/part-%02d.b64' "$VERSION" "$i")"
+            put_file "$target" "$f" "Site Migrator $VERSION package part $i"
+            i=$((i+1))
+          done
+          put_file "bootstrap/package.sha256" "dist-1024/package.sha256" "Site Migrator $VERSION checksum"
+          put_file "bootstrap/release.json" "dist-1024/release-bootstrap.json" "Publish Site Migrator $VERSION updater manifest"
