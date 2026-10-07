@@ -21,11 +21,13 @@ jobs:
           ROOT="$WORK/pkg/h2o-ia-site-migrator"
           echo "=== hero refs ==="
           grep -RniE "hero|h2osm-hero|full_width_content|bg_image|button" "$ROOT" | head -n 500 || true
-          echo "=== profile ==="
-          sed -n '1,80p' "$ROOT/profiles/templa-design.php"
+          echo "=== profile head ==="
+          nl -ba "$ROOT/profiles/templa-design.php" | sed -n '1,24p'
           echo "=== sync ==="
-          sed -n '1,420p' "$ROOT/includes/class-sync.php"
+          nl -ba "$ROOT/includes/class-sync.php" | sed -n '1,260p'
           echo "=== plugin ==="
-          sed -n '1,320p' "$ROOT/includes/class-plugin.php"
+          nl -ba "$ROOT/includes/class-plugin.php" | sed -n '1,220p'
+          echo "=== profile loader ==="
+          grep -RniE "profile|profiles|source_url|source|pages" "$ROOT/includes" | head -n 300 || true
           echo "=== files ==="
           find "$ROOT/includes" -maxdepth 1 -type f -print | sort
