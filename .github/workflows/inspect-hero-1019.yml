@@ -22,6 +22,10 @@ jobs:
           echo "=== hero refs ==="
           grep -RniE "hero|h2osm-hero|full_width_content|bg_image|button" "$ROOT" | head -n 500 || true
           echo "=== profile ==="
-          sed -n '1,520p' "$ROOT/profiles/templa-design.php"
+          sed -n '1,80p' "$ROOT/profiles/templa-design.php"
+          echo "=== sync ==="
+          sed -n '1,420p' "$ROOT/includes/class-sync.php"
+          echo "=== plugin ==="
+          sed -n '1,320p' "$ROOT/includes/class-plugin.php"
           echo "=== files ==="
           find "$ROOT/includes" -maxdepth 1 -type f -print | sort
