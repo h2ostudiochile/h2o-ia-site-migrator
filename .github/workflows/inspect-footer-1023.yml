@@ -21,6 +21,8 @@ jobs:
           cat bootstrap/1.0.23/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/pkg.zip"
           unzip -q "$WORK/pkg.zip" -d "$WORK/pkg"
           ROOT="$WORK/pkg/h2o-ia-site-migrator"
+          echo "=== profile head ==="
+          nl -ba "$ROOT/profiles/templa-design.php" | sed -n '1,90p'
           echo "=== footer phrase refs ==="
           grep -Rni -C 8 -E "Tu próximo espacio|Conversemos|conversemos|proximo espacio|próximo espacio" "$ROOT" || true
           echo "=== funnels ==="
