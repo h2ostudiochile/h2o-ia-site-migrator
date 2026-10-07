@@ -1,0 +1,803 @@
+name: Test and release h2o IA Site Migrator 1.0.20
+
+on:
+  push:
+    branches:
+      - main
+      - fix/nectar-slider-hero-1.0.20
+    paths:
+      - '.github/workflows/release-1.0.20.yml'
+      - 'bootstrap/trigger-1.0.20.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h2o-ia-site-migrator-1.0.20-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build smart native Nectar hero 1.0.20
+        shell: bash
+        run: |
+          set -Euo pipefail
+          trap 'rc=$?; echo "FAILED line $LINENO: $BASH_COMMAND"; exit "$rc"' ERR
+
+          BASE_VERSION="1.0.19"
+          VERSION="1.0.20"
+          WORK="$RUNNER_TEMP/h2osm-$VERSION"
+          DIST="$GITHUB_WORKSPACE/dist-1020"
+
+          rm -rf "$WORK" "$DIST"
+          mkdir -p "$WORK/current" "$DIST/parts"
+
+          cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
+          unzip -q "$WORK/current.zip" -d "$WORK/current"
+          ROOT="$WORK/current/h2o-ia-site-migrator"
+
+          cat > "$ROOT/includes/class-smart-hero.php" <<'PHP'
+          <?php
+          namespace H2O\Site_Migrator;
+
+          if ( ! defined( 'ABSPATH' ) ) {
+              exit;
+          }
+
+          /**
+           * Canonical smart hero migration.
+           *
+           * Converts the source site's real hero/slider into native Salient Nectar Slider data.
+           * No generated CSS, no generated JS, no HTML slider emulation.
+           */
+          final class Smart_Hero {
+              private const STATE_OPTION = 'h2osm_smart_hero_v1';
+              private const MANAGED_META = '_h2osm_managed_hero_key';
+              private const MAX_SLIDES = 12;
+
+              public static function upgrade_content( string $content, ?\WP_Post $target, array $page, array $profile ): string {
+                  if ( ! self::is_home_page( $target, $page ) ) {
+                      return $content;
+                  }
+
+                  // Do not wrap an already-native hero again.
+                  if ( false !== strpos( $content, '[nectar_slider ' ) ) {
+                      return $content;
+                  }
+
+                  if ( ! post_type_exists( 'nectar_slider' ) || ! taxonomy_exists( 'slider-locations' ) ) {
+                      self::record_state( 'nectar_unavailable', array( 'slug' => (string) ( $page['slug'] ?? '' ) ) );
+                      return $content;
+                  }
+
+                  $slides = self::source_slides( $target );
+                  if ( empty( $slides ) ) {
+                      self::record_state( 'source_hero_not_found', array( 'slug' => (string) ( $page['slug'] ?? '' ) ) );
+                      return $content;
+                  }
+
+                  $slides = array_slice( self::unique_slides( $slides ), 0, self::MAX_SLIDES );
+                  $location = self::sync_nectar_slides( $slides, $page, $profile );
+                  if ( is_wp_error( $location ) || '' === $location ) {
+                      self::record_state(
+                          'nectar_sync_failed',
+                          array(
+                              'slug' => (string) ( $page['slug'] ?? '' ),
+                              'error' => is_wp_error( $location ) ? $location->get_error_code() : 'empty_location',
+                          )
+                      );
+                      return $content;
+                  }
+
+                  $row = self::row_shortcode( $location, count( $slides ) );
+                  $replaced = self::replace_first_hero_row( $content, $row );
+                  if ( $replaced === $content ) {
+                      // The page profile may not yet contain a static hero; prepend the native hero rather than inventing CSS.
+                      $replaced = $row . "\n\n" . $content;
+                  }
+
+                  self::record_state(
+                      'configured',
+                      array(
+                          'slug' => sanitize_title( (string) ( $page['slug'] ?? '' ) ),
+                          'location' => $location,
+                          'slides' => count( $slides ),
+                      )
+                  );
+
+                  return $replaced;
+              }
+
+              private static function is_home_page( ?\WP_Post $target, array $page ): bool {
+                  $slug = sanitize_title( (string) ( $page['slug'] ?? '' ) );
+                  if ( in_array( $slug, array( 'inicio', 'home', 'homepage' ), true ) ) {
+                      return true;
+                  }
+                  $front = (int) get_option( 'page_on_front', 0 );
+                  return $front > 0 && $target instanceof \WP_Post && (int) $target->ID === $front;
+              }
+
+              private static function source_slides( ?\WP_Post $target ): array {
+                  $sources = array();
+                  $front_id = (int) get_option( 'page_on_front', 0 );
+                  if ( $front_id > 0 ) {
+                      $front = get_post( $front_id );
+                      if ( $front instanceof \WP_Post ) {
+                          $sources[] = (string) $front->post_content;
+                      }
+                  }
+                  if ( $target instanceof \WP_Post ) {
+                      $sources[] = (string) $target->post_content;
+                  }
+
+                  foreach ( array_values( array_unique( array_filter( $sources ) ) ) as $source ) {
+                      // Prefer true builder source and avoid re-reading our generated migration output.
+                      if ( false !== strpos( $source, 'h2o-site-migrator:' ) && false === strpos( $source, '[et_pb_slide' ) ) {
+                          continue;
+                      }
+                      $slides = self::extract_source_slides( $source );
+                      if ( ! empty( $slides ) ) {
+                          return $slides;
+                      }
+                  }
+
+                  $remote = wp_safe_remote_get(
+                      home_url( '/' ),
+                      array(
+                          'timeout' => 8,
+                          'redirection' => 2,
+                          'headers' => array( 'Accept' => 'text/html,application/xhtml+xml' ),
+                      )
+                  );
+                  if ( ! is_wp_error( $remote ) && 200 === (int) wp_remote_retrieve_response_code( $remote ) ) {
+                      return self::extract_rendered_slides( (string) wp_remote_retrieve_body( $remote ) );
+                  }
+
+                  return array();
+              }
+
+              /**
+               * Public for deterministic regression tests. Extracts semantic slides from builder source.
+               */
+              public static function extract_source_slides( string $source ): array {
+                  $slides = array();
+
+                  // Divi native slider/fullwidth slider.
+                  if ( preg_match_all( '/\\[et_pb_slide\\b([^\\]]*)\\](.*?)\\[\\/et_pb_slide\\]/is', $source, $matches, PREG_SET_ORDER ) ) {
+                      foreach ( $matches as $match ) {
+                          $atts = self::parse_shortcode_atts( (string) $match[1] );
+                          $body = (string) $match[2];
+                          $image = self::first_non_empty(
+                              array(
+                                  $atts['background_image'] ?? '',
+                                  $atts['background_image_tablet'] ?? '',
+                                  $atts['background_image_phone'] ?? '',
+                                  $atts['image'] ?? '',
+                              )
+                          );
+                          $image = self::absolute_url( $image );
+                          if ( '' === $image ) {
+                              continue;
+                          }
+
+                          $heading = self::first_non_empty(
+                              array(
+                                  $atts['heading'] ?? '',
+                                  $atts['title'] ?? '',
+                                  self::html_heading( $body ),
+                              )
+                          );
+                          $caption = self::clean_caption( $body, $heading );
+
+                          $buttons = array();
+                          self::append_button( $buttons, $atts['button_text'] ?? '', $atts['button_link'] ?? ( $atts['button_url'] ?? '' ) );
+                          self::append_button( $buttons, $atts['button_text_2'] ?? '', $atts['button_link_2'] ?? ( $atts['button_url_2'] ?? '' ) );
+
+                          $slides[] = array(
+                              'image' => $image,
+                              'heading' => self::clean_text( $heading ),
+                              'caption' => $caption,
+                              'buttons' => $buttons,
+                              'x' => self::alignment( $atts ),
+                              'font' => self::font_color( $atts ),
+                          );
+                      }
+                  }
+
+                  if ( ! empty( $slides ) ) {
+                      return $slides;
+                  }
+
+                  // Source already has semantic HTML slider markup.
+                  return self::extract_rendered_slides( $source );
+              }
+
+              public static function rewrite_internal_url( string $url, array $profile ): string {
+                  $url = trim( html_entity_decode( $url, ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
+                  if ( '' === $url || str_starts_with( $url, '#' ) || str_starts_with( strtolower( $url ), 'mailto:' ) || str_starts_with( strtolower( $url ), 'tel:' ) ) {
+                      return $url;
+                  }
+
+                  $parts = wp_parse_url( $url );
+                  if ( false === $parts ) {
+                      return $url;
+                  }
+
+                  $current_host = strtolower( (string) wp_parse_url( home_url( '/' ), PHP_URL_HOST ) );
+                  $url_host = strtolower( (string) ( $parts['host'] ?? '' ) );
+                  if ( '' !== $url_host && preg_replace( '/^www\\./', '', $url_host ) !== preg_replace( '/^www\\./', '', $current_host ) ) {
+                      return $url;
+                  }
+
+                  $path = (string) ( $parts['path'] ?? '/' );
+                  $path = '/' . ltrim( $path, '/' );
+                  $trimmed = trim( $path, '/' );
+                  $segments = '' === $trimmed ? array() : explode( '/', $trimmed );
+                  $first = sanitize_title( (string) ( $segments[0] ?? '' ) );
+
+                  foreach ( (array) ( $profile['pages'] ?? array() ) as $candidate ) {
+                      $canonical = sanitize_title( (string) ( $candidate['slug'] ?? '' ) );
+                      $names = array_filter( array_merge( array( $canonical ), array_map( 'sanitize_title', (array) ( $candidate['aliases'] ?? array() ) ) ) );
+                      if ( '' !== $first && in_array( $first, $names, true ) ) {
+                          $segments[0] = $canonical;
+                          $path = '/' . implode( '/', $segments ) . '/';
+                          break;
+                      }
+                  }
+
+                  $out = home_url( $path );
+                  if ( isset( $parts['query'] ) && '' !== (string) $parts['query'] ) {
+                      $out .= '?' . $parts['query'];
+                  }
+                  if ( isset( $parts['fragment'] ) && '' !== (string) $parts['fragment'] ) {
+                      $out .= '#' . $parts['fragment'];
+                  }
+                  return $out;
+              }
+
+              private static function extract_rendered_slides( string $html ): array {
+                  if ( '' === trim( $html ) || ! class_exists( '\\DOMDocument' ) ) {
+                      return array();
+                  }
+
+                  $previous = libxml_use_internal_errors( true );
+                  $dom = new \DOMDocument();
+                  $loaded = $dom->loadHTML( '<?xml encoding="utf-8" ?>' . $html, LIBXML_NOWARNING | LIBXML_NOERROR );
+                  libxml_clear_errors();
+                  libxml_use_internal_errors( $previous );
+                  if ( ! $loaded ) {
+                      return array();
+                  }
+
+                  $xpath = new \DOMXPath( $dom );
+                  $expr = "//*[contains(concat(' ', normalize-space(@class), ' '), ' et_pb_slide ') or contains(concat(' ', normalize-space(@class), ' '), ' swiper-slide ') or contains(concat(' ', normalize-space(@class), ' '), ' slick-slide ') or contains(concat(' ', normalize-space(@class), ' '), ' carousel-item ')]";
+                  $nodes = $xpath->query( $expr );
+                  if ( ! $nodes || 0 === $nodes->length ) {
+                      $nodes = $xpath->query( "//*[contains(translate(@class,'HERO','hero'),'hero') or contains(translate(@class,'BANNER','banner'),'banner')][1]" );
+                  }
+                  if ( ! $nodes ) {
+                      return array();
+                  }
+
+                  $slides = array();
+                  foreach ( $nodes as $node ) {
+                      if ( ! $node instanceof \DOMElement ) {
+                          continue;
+                      }
+                      $image = self::node_image( $node, $xpath, $html );
+                      if ( '' === $image ) {
+                          continue;
+                      }
+
+                      $heading = '';
+                      $headings = $xpath->query( './/h1|.//h2|.//h3', $node );
+                      if ( $headings && $headings->length > 0 ) {
+                          $heading = self::clean_text( (string) $headings->item(0)->textContent );
+                      }
+
+                      $caption = '';
+                      $paragraphs = $xpath->query( './/p', $node );
+                      if ( $paragraphs ) {
+                          $bits = array();
+                          foreach ( $paragraphs as $p ) {
+                              $text = self::clean_text( (string) $p->textContent );
+                              if ( '' !== $text && $text !== $heading ) {
+                                  $bits[] = $text;
+                              }
+                          }
+                          $caption = trim( implode( ' ', array_unique( $bits ) ) );
+                      }
+
+                      $buttons = array();
+                      $links = $xpath->query( './/a[@href]', $node );
+                      if ( $links ) {
+                          foreach ( $links as $link ) {
+                              if ( ! $link instanceof \DOMElement ) {
+                                  continue;
+                              }
+                              $class = strtolower( $link->getAttribute( 'class' ) );
+                              $label = self::clean_text( (string) $link->textContent );
+                              if ( '' === $label || ! preg_match( '/button|btn|cta|more|action/i', $class . ' ' . $label ) ) {
+                                  continue;
+                              }
+                              self::append_button( $buttons, $label, $link->getAttribute( 'href' ) );
+                              if ( count( $buttons ) >= 2 ) {
+                                  break;
+                              }
+                          }
+                      }
+
+                      $slides[] = array(
+                          'image' => $image,
+                          'heading' => $heading,
+                          'caption' => $caption,
+                          'buttons' => $buttons,
+                          'x' => 'left',
+                          'font' => 'light',
+                      );
+                  }
+
+                  return $slides;
+              }
+
+              private static function node_image( \DOMElement $node, \DOMXPath $xpath, string $html ): string {
+                  foreach ( array( 'data-bg', 'data-background', 'data-bg-image', 'data-lazy-bg', 'data-src' ) as $attr ) {
+                      $value = self::absolute_url( $node->getAttribute( $attr ) );
+                      if ( '' !== $value ) {
+                          return $value;
+                      }
+                  }
+
+                  $style = $node->getAttribute( 'style' );
+                  if ( preg_match( '/background-image\\s*:\\s*url\\((["\\\']?)(.*?)\\1\\)/i', $style, $m ) ) {
+                      return self::absolute_url( (string) $m[2] );
+                  }
+
+                  $class_tokens = preg_split( '/\\s+/', trim( $node->getAttribute( 'class' ) ) ) ?: array();
+                  foreach ( $class_tokens as $class ) {
+                      if ( ! preg_match( '/^[A-Za-z0-9_-]+$/', $class ) ) {
+                          continue;
+                      }
+                      $quoted = preg_quote( $class, '/' );
+                      if ( preg_match( '/\\.' . $quoted . '(?:[^,{]*)\\{[^}]*background-image\\s*:\\s*url\\((["\\\']?)(.*?)\\1\\)/is', $html, $m ) ) {
+                          return self::absolute_url( (string) $m[2] );
+                      }
+                  }
+
+                  $imgs = $xpath->query( './/img', $node );
+                  if ( $imgs && $imgs->length > 0 && $imgs->item(0) instanceof \DOMElement ) {
+                      $img = $imgs->item(0);
+                      foreach ( array( 'src', 'data-src', 'data-lazy-src' ) as $attr ) {
+                          $value = self::absolute_url( $img->getAttribute( $attr ) );
+                          if ( '' !== $value ) {
+                              return $value;
+                          }
+                      }
+                  }
+
+                  return '';
+              }
+
+              private static function sync_nectar_slides( array $slides, array $page, array $profile ): string|\WP_Error {
+                  $profile_key = sanitize_key( (string) ( $profile['key'] ?? 'site' ) );
+                  $page_slug = sanitize_title( (string) ( $page['slug'] ?? 'home' ) );
+                  $location_name = 'H2O ' . ucwords( str_replace( array( '-', '_' ), ' ', $page_slug ) ) . ' Hero';
+                  $location_slug = sanitize_title( $profile_key . '-' . $page_slug . '-hero' );
+
+                  $term = get_term_by( 'slug', $location_slug, 'slider-locations' );
+                  if ( ! $term ) {
+                      $created = wp_insert_term( $location_name, 'slider-locations', array( 'slug' => $location_slug ) );
+                      if ( is_wp_error( $created ) ) {
+                          return $created;
+                      }
+                      $term = get_term( (int) $created['term_id'], 'slider-locations' );
+                  }
+                  if ( ! $term || is_wp_error( $term ) ) {
+                      return new \WP_Error( 'h2osm_hero_location_failed', 'No fue posible crear la ubicación nativa del Nectar Slider.' );
+                  }
+
+                  $active_ids = array();
+                  foreach ( $slides as $index => $slide ) {
+                      $key = $profile_key . ':' . $page_slug . ':' . $index;
+                      $existing = get_posts(
+                          array(
+                              'post_type' => 'nectar_slider',
+                              'post_status' => array( 'publish', 'draft', 'private' ),
+                              'posts_per_page' => 1,
+                              'meta_key' => self::MANAGED_META,
+                              'meta_value' => $key,
+                              'fields' => 'ids',
+                              'suppress_filters' => true,
+                          )
+                      );
+                      $postarr = array(
+                          'post_type' => 'nectar_slider',
+                          'post_status' => 'publish',
+                          'post_title' => 'H2O Hero ' . ( $index + 1 ) . ' — ' . ( self::clean_text( (string) ( $slide['heading'] ?? '' ) ) ?: $page_slug ),
+                          'menu_order' => $index,
+                      );
+                      if ( ! empty( $existing ) ) {
+                          $postarr['ID'] = (int) $existing[0];
+                          $slide_id = wp_update_post( wp_slash( $postarr ), true );
+                      } else {
+                          $slide_id = wp_insert_post( wp_slash( $postarr ), true );
+                      }
+                      if ( is_wp_error( $slide_id ) ) {
+                          return $slide_id;
+                      }
+                      $slide_id = (int) $slide_id;
+                      $active_ids[] = $slide_id;
+
+                      update_post_meta( $slide_id, self::MANAGED_META, $key );
+                      update_post_meta( $slide_id, '_nectar_slider_bg_type', 'image_bg' );
+                      update_post_meta( $slide_id, '_nectar_slider_image', esc_url_raw( (string) $slide['image'] ) );
+                      update_post_meta( $slide_id, '_nectar_slider_slide_bg_alignment', 'center' );
+                      update_post_meta( $slide_id, '_nectar_slider_slide_font_color', in_array( (string) ( $slide['font'] ?? '' ), array( 'light', 'dark' ), true ) ? $slide['font'] : 'light' );
+                      update_post_meta( $slide_id, '_nectar_slider_heading', wp_kses_post( (string) ( $slide['heading'] ?? '' ) ) );
+                      update_post_meta( $slide_id, '_nectar_slider_caption', wp_kses_post( (string) ( $slide['caption'] ?? '' ) ) );
+                      update_post_meta( $slide_id, '_nectar_slider_link_type', 'button_links' );
+                      update_post_meta( $slide_id, '_nectar_slide_xpos_alignment', in_array( (string) ( $slide['x'] ?? '' ), array( 'left', 'centered', 'right' ), true ) ? $slide['x'] : 'left' );
+                      update_post_meta( $slide_id, '_nectar_slide_ypos_alignment', 'middle' );
+
+                      $buttons = array_values( (array) ( $slide['buttons'] ?? array() ) );
+                      for ( $button_index = 0; $button_index < 2; $button_index++ ) {
+                          $suffix = 0 === $button_index ? '' : '_2';
+                          $button = $buttons[ $button_index ] ?? array();
+                          $label = sanitize_text_field( (string) ( $button['text'] ?? '' ) );
+                          $url = self::rewrite_internal_url( (string) ( $button['url'] ?? '' ), $profile );
+                          update_post_meta( $slide_id, '_nectar_slider_button' . $suffix, $label );
+                          update_post_meta( $slide_id, '_nectar_slider_button_url' . $suffix, esc_url_raw( $url ) );
+                          update_post_meta( $slide_id, '_nectar_slider_button_style' . $suffix, 'solid_color' );
+                          update_post_meta( $slide_id, '_nectar_slider_button_color' . $suffix, 'primary-color' );
+                      }
+
+                      wp_set_object_terms( $slide_id, array( (int) $term->term_id ), 'slider-locations', false );
+                  }
+
+                  // Retire only surplus slides created by this migrator; never touch manual Nectar slides.
+                  $managed = get_posts(
+                      array(
+                          'post_type' => 'nectar_slider',
+                          'post_status' => array( 'publish', 'draft', 'private' ),
+                          'posts_per_page' => -1,
+                          'meta_key' => self::MANAGED_META,
+                          'meta_value' => $profile_key . ':' . $page_slug . ':',
+                          'meta_compare' => 'LIKE',
+                          'fields' => 'ids',
+                          'suppress_filters' => true,
+                      )
+                  );
+                  foreach ( $managed as $managed_id ) {
+                      $managed_id = (int) $managed_id;
+                      if ( ! in_array( $managed_id, $active_ids, true ) ) {
+                          wp_set_object_terms( $managed_id, array(), 'slider-locations', false );
+                          wp_update_post( array( 'ID' => $managed_id, 'post_status' => 'draft' ) );
+                      }
+                  }
+
+                  return (string) $term->name;
+              }
+
+              public static function row_shortcode( string $location, int $count = 1 ): string {
+                  $location = str_replace( '"', '&quot;', $location );
+                  $multi = $count > 1;
+                  $slider = '[nectar_slider location="' . $location . '" full_width="true" slider_height="650" flexible_slider_height="true" min_slider_height="420" loop="' . ( $multi ? 'true' : 'false' ) . '" arrow_navigation="' . ( $multi ? 'true' : 'false' ) . '" bullet_navigation="' . ( $multi ? 'true' : 'false' ) . '" desktop_swipe="true" slider_transition="slide" caption_transition="fade_in_from_bottom" autorotate="' . ( $multi ? '5000' : '' ) . '" heading_tag="h1" button_sizing="regular"]';
+                  return '[vc_row type="full_width_content" top_padding="0" bottom_padding="0"][vc_column width="1/1" column_padding="no-extra-padding"]' . $slider . '[/vc_column][/vc_row]';
+              }
+
+              private static function replace_first_hero_row( string $content, string $replacement ): string {
+                  $pattern = '/\\[vc_row\\b(?=[^\\]]*\\btype="full_width_content")(?=[^\\]]*\\bbg_image="[^"]+")[^\\]]*\\].*?\\[\\/vc_row\\]/is';
+                  if ( preg_match( $pattern, $content ) ) {
+                      return (string) preg_replace( $pattern, addcslashes( $replacement, '\\$' ), $content, 1 );
+                  }
+                  return $content;
+              }
+
+              private static function unique_slides( array $slides ): array {
+                  $out = array();
+                  $seen = array();
+                  foreach ( $slides as $slide ) {
+                      $image = esc_url_raw( (string) ( $slide['image'] ?? '' ) );
+                      if ( '' === $image ) {
+                          continue;
+                      }
+                      $key = strtolower( $image . '|' . self::clean_text( (string) ( $slide['heading'] ?? '' ) ) );
+                      if ( isset( $seen[ $key ] ) ) {
+                          continue;
+                      }
+                      $seen[ $key ] = true;
+                      $slide['image'] = $image;
+                      $out[] = $slide;
+                  }
+                  return $out;
+              }
+
+              private static function parse_shortcode_atts( string $raw ): array {
+                  if ( function_exists( 'shortcode_parse_atts' ) ) {
+                      $atts = shortcode_parse_atts( trim( $raw ) );
+                      return is_array( $atts ) ? $atts : array();
+                  }
+                  $atts = array();
+                  if ( preg_match_all( '/([A-Za-z0-9_-]+)\\s*=\\s*(["\\\'])(.*?)\\2/s', $raw, $matches, PREG_SET_ORDER ) ) {
+                      foreach ( $matches as $match ) {
+                          $atts[ strtolower( $match[1] ) ] = html_entity_decode( $match[3], ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                      }
+                  }
+                  return $atts;
+              }
+
+              private static function html_heading( string $body ): string {
+                  if ( preg_match( '/<h[1-3][^>]*>(.*?)<\\/h[1-3]>/is', $body, $m ) ) {
+                      return self::clean_text( $m[1] );
+                  }
+                  return '';
+              }
+
+              private static function clean_caption( string $body, string $heading ): string {
+                  $body = preg_replace( '/\\[(?:\\/?)[A-Za-z0-9_-]+(?:[^\\]]*)\\]/', ' ', $body );
+                  $body = preg_replace( '/<h[1-3][^>]*>.*?<\\/h[1-3]>/is', ' ', (string) $body );
+                  $text = self::clean_text( (string) $body );
+                  if ( '' !== $heading ) {
+                      $text = trim( str_replace( self::clean_text( $heading ), '', $text ) );
+                  }
+                  return $text;
+              }
+
+              private static function clean_text( string $value ): string {
+                  $value = html_entity_decode( wp_strip_all_tags( $value ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                  return trim( preg_replace( '/\\s+/u', ' ', $value ) );
+              }
+
+              private static function append_button( array &$buttons, string $text, string $url ): void {
+                  $text = self::clean_text( $text );
+                  $url = trim( html_entity_decode( $url, ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
+                  if ( '' === $text || '' === $url ) {
+                      return;
+                  }
+                  $buttons[] = array( 'text' => $text, 'url' => $url );
+              }
+
+              private static function alignment( array $atts ): string {
+                  $raw = strtolower( self::first_non_empty( array( $atts['text_alignment'] ?? '', $atts['content_alignment'] ?? '', $atts['alignment'] ?? '' ) ) );
+                  if ( str_contains( $raw, 'center' ) ) {
+                      return 'centered';
+                  }
+                  if ( str_contains( $raw, 'right' ) ) {
+                      return 'right';
+                  }
+                  return 'left';
+              }
+
+              private static function font_color( array $atts ): string {
+                  $raw = strtolower( self::first_non_empty( array( $atts['text_color'] ?? '', $atts['background_layout'] ?? '' ) ) );
+                  if ( str_contains( $raw, 'light' ) ) {
+                      return 'dark';
+                  }
+                  return 'light';
+              }
+
+              private static function first_non_empty( array $values ): string {
+                  foreach ( $values as $value ) {
+                      if ( '' !== trim( (string) $value ) ) {
+                          return trim( (string) $value );
+                      }
+                  }
+                  return '';
+              }
+
+              private static function absolute_url( string $url ): string {
+                  $url = trim( html_entity_decode( $url, ENT_QUOTES | ENT_HTML5, 'UTF-8' ), " \t\n\r\0\x0B\"'" );
+                  if ( '' === $url || str_starts_with( $url, 'data:' ) ) {
+                      return '';
+                  }
+                  if ( preg_match( '#^https?://#i', $url ) ) {
+                      return esc_url_raw( $url );
+                  }
+                  if ( str_starts_with( $url, '//' ) ) {
+                      return esc_url_raw( ( is_ssl() ? 'https:' : 'http:' ) . $url );
+                  }
+                  if ( str_starts_with( $url, '/' ) ) {
+                      return esc_url_raw( home_url( $url ) );
+                  }
+                  return '';
+              }
+
+              private static function record_state( string $status, array $extra = array() ): void {
+                  update_option(
+                      self::STATE_OPTION,
+                      array_merge(
+                          array(
+                              'status' => sanitize_key( $status ),
+                              'updated_at' => gmdate( 'c' ),
+                          ),
+                          $extra
+                      ),
+                      false
+                  );
+              }
+          }
+          PHP
+
+          python3 - "$ROOT" <<'PY'
+          import pathlib,sys,re
+          root=pathlib.Path(sys.argv[1])
+          main=root/'h2o-ia-site-migrator.php'
+          s=main.read_text()
+          s=s.replace('Version: 1.0.19','Version: 1.0.20')
+          s=s.replace("define( 'H2OSM_VERSION', '1.0.19' );","define( 'H2OSM_VERSION', '1.0.20' );")
+          needle="require_once H2OSM_DIR . 'includes/class-content-validator.php';"
+          if "class-smart-hero.php" not in s:
+              s=s.replace(needle,needle+"\nrequire_once H2OSM_DIR . 'includes/class-smart-hero.php';")
+          main.write_text(s)
+
+          sync=root/'includes/class-sync.php'
+          s=sync.read_text()
+          needle="$content = (string) $page['content'];"
+          replacement=needle+"\n            $content = Smart_Hero::upgrade_content( $content, $post, $page, $profile );"
+          if 'Smart_Hero::upgrade_content' not in s:
+              if needle not in s: raise SystemExit('sync content hook not found')
+              s=s.replace(needle,replacement,1)
+          sync.write_text(s)
+
+          profile=root/'profiles/templa-design.php'
+          s=profile.read_text().replace('1.0.19','1.0.20')
+          profile.write_text(s)
+
+          changelog=root/'CHANGELOG.md'
+          old=changelog.read_text() if changelog.exists() else ''
+          entry="""## 1.0.20 — 2026-10-07
+          - Regla canónica: el hero de la portada se migra como Nectar Slider nativo, nunca como CSS o slider HTML inventado.
+          - Lee primero el contenido fuente real de la portada y reconoce slides Divi, Swiper, Slick y carruseles HTML comunes.
+          - Conserva imágenes, heading, caption y hasta dos CTA por slide.
+          - Reescribe enlaces internos de CTA hacia slugs canónicos del sitio migrado.
+          - Crea/actualiza únicamente slides Nectar administrados por Site Migrator; no toca sliders manuales.
+          - Renderiza el slider dentro de vc_row type=full_width_content y nectar_slider full_width=true.
+          - Falla de forma segura: si Nectar Slider no está disponible o el hero no se puede identificar con certeza, conserva el hero existente.
+
+          """
+          changelog.write_text(entry+old)
+          PY
+
+          php -l "$ROOT/includes/class-smart-hero.php"
+          php -l "$ROOT/includes/class-sync.php"
+          php -l "$ROOT/h2o-ia-site-migrator.php"
+          php -l "$ROOT/profiles/templa-design.php"
+
+          cat > "$WORK/test-smart-hero.php" <<'PHP'
+          <?php
+          define('ABSPATH',__DIR__);
+          function home_url($p='/'){return 'https://templadesign.cl'.('/'===substr($p,0,1)?$p:'/'.$p);}
+          function wp_parse_url($u,$component=-1){return parse_url($u,$component);}
+          function sanitize_title($v){$v=strtolower(trim($v));$v=preg_replace('/[^a-z0-9]+/','-',$v);return trim($v,'-');}
+          function sanitize_key($v){return strtolower(preg_replace('/[^a-z0-9_.-]/','',(string)$v));}
+          function wp_strip_all_tags($v){return strip_tags((string)$v);}
+          function esc_url_raw($v){return (string)$v;}
+          function is_ssl(){return true;}
+          function shortcode_parse_atts($raw){
+              $out=[];
+              preg_match_all('/([A-Za-z0-9_-]+)\\s*=\\s*(["\\\'])(.*?)\\2/s',$raw,$m,PREG_SET_ORDER);
+              foreach($m as $x){$out[strtolower($x[1])]=html_entity_decode($x[3],ENT_QUOTES|ENT_HTML5,'UTF-8');}
+              return $out;
+          }
+          require getenv('H2OSM_ROOT').'/includes/class-smart-hero.php';
+
+          $src='[et_pb_fullwidth_slider]'.
+          '[et_pb_slide heading="Creamos entornos que inspiran" background_image="https://templadesign.cl/wp-content/uploads/hero-01.webp" button_text="Hablemos" button_link="/contacto/" text_alignment="left"]ARQUITECTURA, CONSTRUCCIÓN Y MOBILIARIO[/et_pb_slide]'.
+          '[et_pb_slide heading="Creamos entornos que inspiran" background_image="https://templadesign.cl/wp-content/uploads/hero-02.webp" button_text="Hablemos" button_link="/contacto/"]ARQUITECTURA, CONSTRUCCIÓN Y MOBILIARIO[/et_pb_slide]'.
+          '[et_pb_slide heading="Creamos entornos que inspiran" background_image="https://templadesign.cl/wp-content/uploads/hero-03.webp" button_text="Hablemos" button_link="/contacto/"]ARQUITECTURA, CONSTRUCCIÓN Y MOBILIARIO[/et_pb_slide]'.
+          '[et_pb_slide heading="Creamos entornos que inspiran" background_image="https://templadesign.cl/wp-content/uploads/hero-04.webp" button_text="Hablemos" button_link="/contacto/"]ARQUITECTURA, CONSTRUCCIÓN Y MOBILIARIO[/et_pb_slide]'.
+          '[/et_pb_fullwidth_slider]';
+
+          $slides=\H2O\Site_Migrator\Smart_Hero::extract_source_slides($src);
+          if(count($slides)!==4){fwrite(STDERR,"SLIDE_COUNT_FAIL\n");exit(1);}
+          foreach($slides as $i=>$slide){
+              if($slide['heading']!=='Creamos entornos que inspiran'){fwrite(STDERR,"HEADING_FAIL\n");exit(1);}
+              if(($slide['buttons'][0]['text']??'')!=='Hablemos'){fwrite(STDERR,"BUTTON_TEXT_FAIL\n");exit(1);}
+              if(($slide['buttons'][0]['url']??'')!=='/contacto/'){fwrite(STDERR,"BUTTON_URL_FAIL\n");exit(1);}
+              if(!str_contains($slide['image'],sprintf('hero-%02d.webp',$i+1))){fwrite(STDERR,"IMAGE_FAIL\n");exit(1);}
+          }
+
+          $profile=['pages'=>[
+              ['slug'=>'quienes-somos','aliases'=>['nosotros','about']],
+              ['slug'=>'contacto','aliases'=>['contact','contact-us']],
+          ]];
+          $mapped=\H2O\Site_Migrator\Smart_Hero::rewrite_internal_url('https://templadesign.cl/contact-us/?a=1#form',$profile);
+          if($mapped!=='https://templadesign.cl/contacto/?a=1#form'){fwrite(STDERR,"LINK_MAP_FAIL:$mapped\n");exit(1);}
+
+          $row=\H2O\Site_Migrator\Smart_Hero::row_shortcode('H2O Inicio Hero',4);
+          if(!str_contains($row,'[vc_row type="full_width_content"')){fwrite(STDERR,"ROW_FAIL\n");exit(1);}
+          if(!str_contains($row,'[nectar_slider location="H2O Inicio Hero" full_width="true"')){fwrite(STDERR,"NECTAR_FAIL\n");exit(1);}
+          if(!str_contains($row,'loop="true"')||!str_contains($row,'autorotate="5000"')){fwrite(STDERR,"MULTI_FAIL\n");exit(1);}
+
+          echo "SITE_MIGRATOR_1020_NATIVE_NECTAR_HERO_OK\n";
+          PHP
+          H2OSM_ROOT="$ROOT" php "$WORK/test-smart-hero.php"
+
+          grep -Fq "Smart_Hero::upgrade_content" "$ROOT/includes/class-sync.php"
+          grep -Fq "post_type_exists( 'nectar_slider' )" "$ROOT/includes/class-smart-hero.php"
+          grep -Fq "wp_insert_term( $location_name, 'slider-locations'" "$ROOT/includes/class-smart-hero.php"
+          grep -Fq "'_nectar_slider_image'" "$ROOT/includes/class-smart-hero.php"
+          grep -Fq "'_nectar_slider_heading'" "$ROOT/includes/class-smart-hero.php"
+          grep -Fq "'_nectar_slider_caption'" "$ROOT/includes/class-smart-hero.php"
+          grep -Fq "'_nectar_slider_button'" "$ROOT/includes/class-smart-hero.php"
+          grep -Fq "'_nectar_slider_button_url'" "$ROOT/includes/class-smart-hero.php"
+          grep -Fq '[vc_row type="full_width_content"' "$ROOT/includes/class-smart-hero.php"
+          grep -Fq 'full_width="true"' "$ROOT/includes/class-smart-hero.php"
+
+          (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
+          SHA="$(sha256sum "$DIST/h2o-ia-site-migrator-$VERSION.zip" | awk '{print $1}')"
+          echo "$SHA" > "$DIST/package.sha256"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          base64 -w0 "$DIST/h2o-ia-site-migrator-$VERSION.zip" > "$DIST/package.b64"
+          split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/raw-"
+
+          python3 - "$VERSION" "$SHA" "$DIST" <<'PY'
+          import json,pathlib,sys
+          version,sha,dist=sys.argv[1],sys.argv[2],pathlib.Path(sys.argv[3])
+          raw=sorted((dist/'parts').glob('raw-*'))
+          parts=[f'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/{version}/part-{i:02d}.b64' for i in range(1,len(raw)+1)]
+          bootstrap={'version':version,'package_id':'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256','package_sha256':sha,'parts':parts,'tested':'7.1','requires_php':'8.0'}
+          release={'version':version,'package_url':f'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v{version}/h2o-ia-site-migrator-{version}.zip','package_sha256':sha,'tested':'7.1','requires_php':'8.0'}
+          (dist/'release-bootstrap.json').write_text(json.dumps(bootstrap,indent=2)+'\n')
+          (dist/'release.json').write_text(json.dumps(release,indent=2)+'\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h2o-ia-site-migrator-1.0.20-tested
+          path: |
+            dist-1020/h2o-ia-site-migrator-1.0.20.zip
+            dist-1020/release.json
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          PACKAGE="dist-1020/h2o-ia-site-migrator-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PACKAGE" dist-1020/release.json --clobber
+          else
+            gh release create "$TAG" "$PACKAGE" dist-1020/release.json \
+              --target main \
+              --title "h2o IA Site Migrator $VERSION" \
+              --notes "Hero inteligente: reconstrucción nativa como Nectar Slider full width a partir del hero real del sitio fuente, preservando imágenes, textos y CTA y remapeando enlaces internos."
+          fi
+
+      - name: Publish updater chunks and manifest
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          put_file () {
+            path="$1"; file="$2"; msg="$3"
+            encoded="$(base64 -w0 "$file")"
+            sha="$(gh api "repos/$REPO/contents/$path?ref=main" --jq '.sha' 2>/dev/null || true)"
+            if [ -n "$sha" ]; then
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f sha="$sha" -f branch="main" >/dev/null
+            else
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f branch="main" >/dev/null
+            fi
+          }
+          i=1
+          for f in $(find dist-1020/parts -type f -name 'raw-*' | sort); do
+            target="$(printf 'bootstrap/%s/part-%02d.b64' "$VERSION" "$i")"
+            put_file "$target" "$f" "Site Migrator $VERSION package part $i"
+            i=$((i+1))
+          done
+          put_file "bootstrap/package.sha256" "dist-1020/package.sha256" "Site Migrator $VERSION checksum"
+          put_file "bootstrap/release.json" "dist-1020/release-bootstrap.json" "Publish Site Migrator $VERSION updater manifest"
