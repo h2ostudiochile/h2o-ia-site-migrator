@@ -189,7 +189,8 @@ jobs:
           a = re.search(r'public static function activate\(\): void \{(.*?)\n    \}\n\n    public static function maybe_sync', s, re.S)
           if not a:
               raise SystemExit('ACTIVATE_NOT_FOUND')
-          if 'if ( ! empty( $state ) )' not in a.group(1):
+          activate_body = a.group(1)
+          if 'if ( empty( $state ) )' not in activate_body or 'self::sync( true )' not in activate_body or 'self::record_handoff_state( $state )' not in activate_body:
               raise SystemExit('REACTIVATION_GUARD_MISSING')
 
           if "'content_owner'   => 'editor'" not in s:
