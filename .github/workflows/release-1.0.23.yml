@@ -42,8 +42,10 @@ jobs:
           unzip -q "$WORK/current.zip" -d "$WORK/current"
           ROOT="$WORK/current/h2o-ia-site-migrator"
 
+          cp patches/1.0.23/class-sync.php "$ROOT/includes/class-sync.php"
+
           python3 - "$ROOT" <<'PY'
-          import pathlib, re, sys
+          import pathlib, sys
           root = pathlib.Path(sys.argv[1])
 
           main = root / 'h2o-ia-site-migrator.php'
@@ -52,90 +54,6 @@ jobs:
           s = s.replace("define( 'H2OSM_VERSION', '1.0.22' );", "define( 'H2OSM_VERSION', '1.0.23' );")
           main.write_text(s)
 
-          sync = root / 'includes/class-sync.php'
-          s = sync.read_text()
-
-          activate_pattern = re.compile(
-              r"    public static function activate\(\): void \{.*?\n    \}\n\n    public static function maybe_sync",
-              re.S,
-          )
-          activate_replacement = """    public static function activate(): void {
-              // First activation performs the migration. Once a migration state
-              // already exists, reactivation is a handoff-preserving no-op:
-              // manual WPBakery edits belong to the editor, not to this plugin.
-              $state = self::state();
-              if ( ! empty( $state ) ) {
-                  self::record_handoff_state( $state );
-                  return;
-              }
-
-              self::sync( true );
-          }
-
-          public static function maybe_sync"""
-          s, n = activate_pattern.subn(activate_replacement, s, count=1)
-          if n != 1:
-              raise SystemExit('ACTIVATE_METHOD_PATCH_FAILED')
-
-          maybe_start = s.find("    public static function maybe_sync(): void {")
-          sync_start = s.find("    public static function sync(", maybe_start)
-          if maybe_start < 0 or sync_start < 0:
-              raise SystemExit('MAYBE_SYNC_METHOD_PATCH_FAILED')
-
-          maybe_replacement = """    public static function maybe_sync(): void {
-              $profile = Registry::current_profile();
-              if ( ! $profile ) {
-                  return;
-              }
-
-              $state = self::state();
-
-              // CRITICAL HANDOFF RULE:
-              // init must never rewrite page content. A migrated page becomes
-              // ordinary editable WordPress/WPBakery content immediately after
-              // migration. Plugin/profile version changes and missing embedded
-              // markers are NOT reasons to call sync().
-              if ( empty( $state ) ) {
-                  return;
-              }
-
-              $state['plugin_version']  = H2OSM_VERSION;
-              $state['profile_key']     = (string) ( $profile['key'] ?? '' );
-              $state['profile_version'] = (string) ( $profile['version'] ?? '' );
-              self::record_handoff_state( $state );
-          }
-
-          """
-          s = s[:maybe_start] + maybe_replacement + s[sync_start:]
-
-          state_needle = """            'managed_pages'   => $managed,
-              'synced_at'       => gmdate( 'c' ),
-          );"""
-          state_replacement = """            'managed_pages'   => $managed,
-              'synced_at'       => gmdate( 'c' ),
-              'content_handoff' => true,
-              'content_owner'   => 'editor',
-          );"""
-          if state_needle not in s:
-              raise SystemExit('STATE_BLOCK_NOT_FOUND')
-          s = s.replace(state_needle, state_replacement, 1)
-
-          insert_before = """    public static function state(): array {"""
-          helper = """    private static function record_handoff_state( array $state ): void {
-              $state['content_handoff'] = true;
-              $state['content_owner']   = 'editor';
-              $state['handoff_at']      = (string) ( $state['handoff_at'] ?? gmdate( 'c' ) );
-              update_option( self::STATE_OPTION, $state, false );
-          }
-
-          """
-          if helper.strip() not in s:
-              if insert_before not in s:
-                  raise SystemExit('STATE_METHOD_NOT_FOUND')
-              s = s.replace(insert_before, helper + insert_before, 1)
-
-          sync.write_text(s)
-
           admin = root / 'includes/class-admin.php'
           a = admin.read_text()
           a = a.replace(
@@ -143,7 +61,7 @@ jobs:
               ' onclick="return confirm(\'Esto sobrescribirá las páginas migradas con el contenido empaquetado y puede descartar cambios manuales. ¿Continuar?\');">Reaplicar migración (sobrescribe contenido)</a>'
           )
           warning_needle = '<p><small>Última sincronización:'
-          warning = '<p><strong>Las páginas migradas quedan libres para editar.</strong> La reaplicación manual es destructiva y solo debe usarse si quieres reemplazar tus cambios.</p>\n                '
+          warning = '<p><strong>Las páginas migradas quedan libres para editar.</strong> La reaplicación manual es destructiva y solo debe usarse si quieres reemplazar tus cambios.</p>\\n                '
           if warning not in a and warning_needle in a:
               a = a.replace(warning_needle, warning + warning_needle, 1)
           admin.write_text(a)
