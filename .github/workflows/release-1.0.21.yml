@@ -1,0 +1,396 @@
+name: Test and release h2o IA Site Migrator 1.0.21
+
+on:
+  push:
+    branches:
+      - main
+      - fix/bakery-empty-structure-1.0.21
+    paths:
+      - '.github/workflows/release-1.0.21.yml'
+      - 'bootstrap/trigger-1.0.21.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h2o-ia-site-migrator-1.0.21-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build semantic WPBakery cleanup 1.0.21
+        shell: bash
+        run: |
+          set -Euo pipefail
+          trap 'rc=$?; echo "FAILED line $LINENO: $BASH_COMMAND"; exit "$rc"' ERR
+
+          BASE_VERSION="1.0.20"
+          VERSION="1.0.21"
+          WORK="$RUNNER_TEMP/h2osm-$VERSION"
+          DIST="$GITHUB_WORKSPACE/dist-1021"
+
+          rm -rf "$WORK" "$DIST"
+          mkdir -p "$WORK/current" "$DIST/parts"
+
+          cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
+          unzip -q "$WORK/current.zip" -d "$WORK/current"
+          ROOT="$WORK/current/h2o-ia-site-migrator"
+
+          cat > "$ROOT/includes/class-content-normalizer.php" <<'PHP'
+          <?php
+          namespace H2O\Site_Migrator;
+
+          if ( ! defined( 'ABSPATH' ) ) {
+              exit;
+          }
+
+          /**
+           * Removes semantically empty WPBakery wrappers produced during migration.
+           *
+           * Important:
+           * - It does NOT flatten non-empty rows/columns.
+           * - It preserves explicit spacing elements such as vc_empty_space.
+           * - It preserves empty containers that intentionally carry a visual
+           *   background/video/parallax/shape configuration.
+           * - It never repairs malformed shortcode nesting. Validation remains
+           *   the authority for malformed structures.
+           */
+          final class Content_Normalizer {
+              private const MAX_PASSES = 12;
+
+              public static function normalize( string $content ): string {
+                  $current = self::clean_interstitial_whitespace( $content );
+
+                  for ( $pass = 0; $pass < self::MAX_PASSES; $pass++ ) {
+                      $before = $current;
+
+                      $current = self::remove_empty_text_blocks( $current );
+                      $current = self::remove_empty_container( $current, 'vc_column_inner' );
+                      $current = self::remove_empty_container( $current, 'vc_column' );
+                      $current = self::remove_empty_container( $current, 'vc_row_inner' );
+                      $current = self::remove_empty_container( $current, 'vc_row' );
+                      $current = self::clean_interstitial_whitespace( $current );
+
+                      if ( $current === $before ) {
+                          break;
+                      }
+                  }
+
+                  return trim( $current );
+              }
+
+              private static function remove_empty_text_blocks( string $content ): string {
+                  return (string) preg_replace_callback(
+                      '/\[vc_column_text\b([^\]]*)\](.*?)\[\/vc_column_text\]/is',
+                      static function ( array $match ): string {
+                          return self::is_semantically_empty( (string) $match[2] ) ? '' : (string) $match[0];
+                      },
+                      $content
+                  );
+              }
+
+              private static function remove_empty_container( string $content, string $tag ): string {
+                  $quoted = preg_quote( $tag, '/' );
+                  $pattern = '/\[' . $quoted . '\b([^\]]*)\](.*?)\[\/' . $quoted . '\]/is';
+
+                  return (string) preg_replace_callback(
+                      $pattern,
+                      static function ( array $match ) use ( $tag ): string {
+                          $attrs = (string) $match[1];
+                          $body  = (string) $match[2];
+
+                          if ( ! self::is_semantically_empty( $body ) ) {
+                              return (string) $match[0];
+                          }
+
+                          if ( self::has_intentional_visual_state( $tag, $attrs ) ) {
+                              return (string) $match[0];
+                          }
+
+                          return '';
+                      },
+                      $content
+                  );
+              }
+
+              private static function is_semantically_empty( string $value ): bool {
+                  $value = preg_replace( '/<!--.*?-->/s', '', $value );
+                  $value = html_entity_decode( (string) $value, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+                  $value = str_replace( array( "\xc2\xa0", '&nbsp;', '&#160;' ), ' ', (string) $value );
+
+                  // WPBakery/WordPress editors often leave empty paragraph shells.
+                  $value = preg_replace( '#<p\b[^>]*>(?:\s|<br\s*/?>)*</p>#i', '', (string) $value );
+                  $value = preg_replace( '#<(?:div|span)\b[^>]*>\s*</(?:div|span)>#i', '', (string) $value );
+
+                  // Any shortcode that survives here is meaningful. In particular,
+                  // vc_empty_space is an intentional spacing element and must stay.
+                  if ( preg_match( '/\[[A-Za-z0-9_-]+\b[^\]]*\]/', (string) $value ) ) {
+                      return false;
+                  }
+
+                  return '' === trim( wp_strip_all_tags( (string) $value ) );
+              }
+
+              private static function has_intentional_visual_state( string $tag, string $attrs ): bool {
+                  if ( '' === trim( $attrs ) ) {
+                      return false;
+                  }
+
+                  // Width/padding/order/full-width are structural and do not make an
+                  // otherwise empty wrapper meaningful.
+                  $visual = array(
+                      'bg_image',
+                      'bg_color',
+                      'background',
+                      'background_color',
+                      'background_image',
+                      'video_bg',
+                      'video_mute',
+                      'parallax',
+                      'parallax_image',
+                      'shape_divider',
+                      'shape_divider_position',
+                      'gradient',
+                      'overlay',
+                      'overlay_strength',
+                  );
+
+                  foreach ( $visual as $name ) {
+                      if ( preg_match( '/(?:^|\s)' . preg_quote( $name, '/' ) . '\s*=\s*["\'][^"\']+["\']/i', $attrs ) ) {
+                          return true;
+                      }
+                  }
+
+                  // Explicit IDs may be anchors targeted by navigation/scripts.
+                  if ( preg_match( '/(?:^|\s)el_id\s*=\s*["\'][^"\']+["\']/i', $attrs ) ) {
+                      return true;
+                  }
+
+                  return false;
+              }
+
+              private static function clean_interstitial_whitespace( string $content ): string {
+                  $content = preg_replace( "/[ \t]+\n/", "\n", $content );
+                  $content = preg_replace( "/\n{3,}/", "\n\n", (string) $content );
+                  return (string) $content;
+              }
+          }
+          PHP
+
+          python3 - "$ROOT" <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+
+          main = root / 'h2o-ia-site-migrator.php'
+          s = main.read_text()
+          s = s.replace('Version: 1.0.20', 'Version: 1.0.21')
+          s = s.replace("define( 'H2OSM_VERSION', '1.0.20' );", "define( 'H2OSM_VERSION', '1.0.21' );")
+          req = "require_once H2OSM_DIR . 'includes/class-content-normalizer.php';"
+          if req not in s:
+              needle = "require_once H2OSM_DIR . 'includes/class-content-validator.php';"
+              if needle not in s:
+                  raise SystemExit('CONTENT_VALIDATOR_REQUIRE_NOT_FOUND')
+              s = s.replace(needle, needle + "\n" + req, 1)
+          main.write_text(s)
+
+          sync = root / 'includes/class-sync.php'
+          s = sync.read_text()
+          hero = "$content = Smart_Hero::upgrade_content( $content, $post, $page, $profile );"
+          normalizer = "$content = Content_Normalizer::normalize( $content );"
+          if normalizer not in s:
+              if hero not in s:
+                  raise SystemExit('SMART_HERO_HOOK_NOT_FOUND')
+              s = s.replace(hero, hero + "\n            " + normalizer, 1)
+          sync.write_text(s)
+
+          profile = root / 'profiles/templa-design.php'
+          p = profile.read_text().replace('1.0.20', '1.0.21')
+          profile.write_text(p)
+
+          changelog = root / 'CHANGELOG.md'
+          old = changelog.read_text() if changelog.exists() else ''
+          entry = """## 1.0.21 — 2026-10-07
+          - Añade normalización semántica final de WPBakery antes de validar y guardar.
+          - Elimina vc_row, vc_row_inner, vc_column, vc_column_inner y vc_column_text realmente vacíos.
+          - Conserva contenido real, vc_empty_space intencional y contenedores con fondos/video/parallax/shape/anchor explícitos.
+          - No aplana filas útiles ni repara nesting inválido; Content_Validator sigue fallando cerrado.
+          - La regla aplica a todos los sitios migrados, incluido Templa.
+
+          """
+          changelog.write_text(entry + old)
+          PY
+
+          php -l "$ROOT/includes/class-content-normalizer.php"
+          php -l "$ROOT/includes/class-sync.php"
+          php -l "$ROOT/h2o-ia-site-migrator.php"
+          php -l "$ROOT/profiles/templa-design.php"
+
+          cat > "$WORK/test-content-normalizer.php" <<'PHP'
+          <?php
+          define( 'ABSPATH', __DIR__ . '/' );
+          function wp_strip_all_tags( $v ) { return strip_tags( (string) $v ); }
+
+          require getenv('H2OSM_ROOT') . '/includes/class-content-normalizer.php';
+
+          $input =
+              '[vc_row][vc_column width="1/1"][/vc_column][/vc_row]' .
+              "\n\n" .
+              '[vc_row type="full_width_content"][vc_column width="1/1"][nectar_slider location="H2O Inicio Hero" full_width="true"][/vc_column][/vc_row]' .
+              "\n\n" .
+              '[vc_row][vc_column][vc_column_text]<p>&nbsp;</p>[/vc_column_text][/vc_column][/vc_row]' .
+              "\n\n" .
+              '[vc_row][vc_column width="1/1"][vc_column_text]<p>Contenido real</p>[/vc_column_text][/vc_column][/vc_row]' .
+              "\n\n" .
+              '[vc_row][vc_column][vc_empty_space height="40px"][/vc_column][/vc_row]' .
+              "\n\n" .
+              '[vc_row bg_image="55"][vc_column][/vc_column][/vc_row]';
+
+          $out = \H2O\Site_Migrator\Content_Normalizer::normalize( $input );
+
+          if ( substr_count( $out, '[vc_row' ) !== 4 ) {
+              fwrite( STDERR, "ROW_COUNT_FAIL\n$out\n" );
+              exit(1);
+          }
+          if ( str_contains( $out, '<p>&nbsp;</p>' ) ) {
+              fwrite( STDERR, "EMPTY_TEXT_REMAINS\n" );
+              exit(1);
+          }
+          if ( ! str_contains( $out, '[nectar_slider location="H2O Inicio Hero" full_width="true"]' ) ) {
+              fwrite( STDERR, "NECTAR_REMOVED\n" );
+              exit(1);
+          }
+          if ( ! str_contains( $out, '<p>Contenido real</p>' ) ) {
+              fwrite( STDERR, "REAL_CONTENT_REMOVED\n" );
+              exit(1);
+          }
+          if ( ! str_contains( $out, '[vc_empty_space height="40px"]' ) ) {
+              fwrite( STDERR, "INTENTIONAL_SPACING_REMOVED\n" );
+              exit(1);
+          }
+          if ( ! str_contains( $out, '[vc_row bg_image="55">' ) ) {
+              fwrite( STDERR, "VISUAL_EMPTY_ROW_REMOVED\n" );
+              exit(1);
+          }
+
+          $only_garbage = '[vc_row type="full_width_content" top_padding="0"][vc_column width="1/1"][/vc_column][/vc_row]';
+          $clean = \H2O\Site_Migrator\Content_Normalizer::normalize( $only_garbage );
+          if ( '' !== $clean ) {
+              fwrite( STDERR, "STRUCTURAL_GARBAGE_NOT_REMOVED:$clean\n" );
+              exit(1);
+          }
+
+          echo "SITE_MIGRATOR_1021_BAKERY_NORMALIZER_OK\n";
+          PHP
+
+          H2OSM_ROOT="$ROOT" php "$WORK/test-content-normalizer.php"
+
+          # Regression: the Nectar hero remains native and the normalizer runs before validation.
+          grep -Fq "Smart_Hero::upgrade_content" "$ROOT/includes/class-sync.php"
+          grep -Fq "Content_Normalizer::normalize" "$ROOT/includes/class-sync.php"
+          grep -Fq "Content_Validator::validate" "$ROOT/includes/class-sync.php"
+
+          python3 - "$ROOT/includes/class-sync.php" <<'PY'
+          import pathlib, sys
+          s = pathlib.Path(sys.argv[1]).read_text()
+          a = s.index('Smart_Hero::upgrade_content')
+          b = s.index('Content_Normalizer::normalize')
+          c = s.index('Content_Validator::validate')
+          if not (a < b < c):
+              raise SystemExit('PIPELINE_ORDER_INVALID')
+          print('PIPELINE_ORDER_OK')
+          PY
+
+          (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
+          SHA="$(sha256sum "$DIST/h2o-ia-site-migrator-$VERSION.zip" | awk '{print $1}')"
+          echo "$SHA" > "$DIST/package.sha256"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          base64 -w0 "$DIST/h2o-ia-site-migrator-$VERSION.zip" > "$DIST/package.b64"
+          split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/raw-"
+
+          python3 - "$VERSION" "$SHA" "$DIST" <<'PY'
+          import json, pathlib, sys
+          version, sha, dist = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
+          raw = sorted((dist / 'parts').glob('raw-*'))
+          parts = [
+              f'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/{version}/part-{i:02d}.b64'
+              for i in range(1, len(raw) + 1)
+          ]
+          bootstrap = {
+              'version': version,
+              'package_id': 'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256',
+              'package_sha256': sha,
+              'parts': parts,
+              'tested': '7.1',
+              'requires_php': '8.0',
+          }
+          release = {
+              'version': version,
+              'package_url': f'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v{version}/h2o-ia-site-migrator-{version}.zip',
+              'package_sha256': sha,
+              'tested': '7.1',
+              'requires_php': '8.0',
+          }
+          (dist / 'release-bootstrap.json').write_text(json.dumps(bootstrap, indent=2) + '\n')
+          (dist / 'release.json').write_text(json.dumps(release, indent=2) + '\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h2o-ia-site-migrator-1.0.21-tested
+          path: |
+            dist-1021/h2o-ia-site-migrator-1.0.21.zip
+            dist-1021/release.json
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          PACKAGE="dist-1021/h2o-ia-site-migrator-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PACKAGE" dist-1021/release.json --clobber
+          else
+            gh release create "$TAG" "$PACKAGE" dist-1021/release.json \
+              --target main \
+              --title "h2o IA Site Migrator $VERSION" \
+              --notes "Normalización semántica WPBakery: elimina filas/columnas vacías antes de validar y guardar, preservando contenido y elementos visuales intencionales."
+          fi
+
+      - name: Publish updater chunks and manifest
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          put_file () {
+            path="$1"; file="$2"; msg="$3"
+            encoded="$(base64 -w0 "$file")"
+            sha="$(gh api "repos/$REPO/contents/$path?ref=main" --jq '.sha' 2>/dev/null || true)"
+            if [ -n "$sha" ]; then
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f sha="$sha" -f branch="main" >/dev/null
+            else
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f branch="main" >/dev/null
+            fi
+          }
+
+          i=1
+          for f in $(find dist-1021/parts -type f -name 'raw-*' | sort); do
+            target="$(printf 'bootstrap/%s/part-%02d.b64' "$VERSION" "$i")"
+            put_file "$target" "$f" "Site Migrator $VERSION package part $i"
+            i=$((i+1))
+          done
+          put_file "bootstrap/package.sha256" "dist-1021/package.sha256" "Site Migrator $VERSION checksum"
+          put_file "bootstrap/release.json" "dist-1021/release-bootstrap.json" "Publish Site Migrator $VERSION updater manifest"
