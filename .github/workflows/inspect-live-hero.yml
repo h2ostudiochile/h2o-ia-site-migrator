@@ -1,0 +1,23 @@
+name: Inspect live hero
+on:
+  push:
+    branches:
+      - fix/nectar-slider-hero-1.0.20
+    paths:
+      - '.github/workflows/inspect-live-hero.yml'
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --compressed -A 'Mozilla/5.0 H2O Site Migrator audit' --max-time 20 https://templadesign.cl/ -o /tmp/templa.html
+          echo "=== hero classes ==="
+          grep -oE '.{0,240}(et_pb_slide|et_pb_slider|swiper-slide|carousel|Creamos entornos).{0,700}' /tmp/templa.html | head -n 80 || true
+          echo "=== image urls around carousel ==="
+          grep -oE 'https?[^"''' )]+\.(webp|jpg|jpeg|png)' /tmp/templa.html | grep -Ei 'templa|slide|carousel|wp-content' | head -n 80 || true
+          echo "=== css background ==="
+          grep -oE 'background-image:[^;"]+' /tmp/templa.html | head -n 80 || true
