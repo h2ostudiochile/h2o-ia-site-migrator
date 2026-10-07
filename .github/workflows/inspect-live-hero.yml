@@ -15,9 +15,23 @@ jobs:
         run: |
           set -euo pipefail
           curl -L --compressed -A 'Mozilla/5.0 H2O Site Migrator audit' --max-time 20 https://templadesign.cl/ -o /tmp/templa.html
-          echo "=== hero classes ==="
-          grep -oE '.{0,240}(et_pb_slide|et_pb_slider|swiper-slide|carousel|Creamos entornos).{0,700}' /tmp/templa.html | head -n 80 || true
-          echo "=== image urls around carousel ==="
-          grep -oE 'https?[^"''' )]+\.(webp|jpg|jpeg|png)' /tmp/templa.html | grep -Ei 'templa|slide|carousel|wp-content' | head -n 80 || true
-          echo "=== css background ==="
-          grep -oE 'background-image:[^;"]+' /tmp/templa.html | head -n 80 || true
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          html=Path('/tmp/templa.html').read_text(errors='ignore')
+          print('=== hero markers ===')
+          for m in re.finditer(r'(et_pb_slide|et_pb_slider|swiper-slide|carousel|Creamos entornos)', html, re.I):
+              a=max(0,m.start()-240); b=min(len(html),m.start()+1200)
+              print(html[a:b].replace('\n',' ')[:1500])
+              print('---')
+          print('=== images ===')
+          urls=[]
+          for u in re.findall(r'https?://[^"\'\s)]+\.(?:webp|jpe?g|png)', html, re.I):
+              if u not in urls:
+                  urls.append(u)
+          for u in urls[:120]:
+              print(u)
+          print('=== backgrounds ===')
+          for x in re.findall(r'background-image\s*:\s*url\(([^)]+)\)', html, re.I):
+              print(x.strip('"\' '))
+          PY
