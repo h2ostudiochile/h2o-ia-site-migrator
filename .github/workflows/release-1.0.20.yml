@@ -721,7 +721,7 @@ jobs:
 
           grep -Fq "Smart_Hero::upgrade_content" "$ROOT/includes/class-sync.php"
           grep -Fq "post_type_exists( 'nectar_slider' )" "$ROOT/includes/class-smart-hero.php"
-          grep -Fq "wp_insert_term( $location_name, 'slider-locations'" "$ROOT/includes/class-smart-hero.php"
+          grep -Fq "wp_insert_term( \$location_name, 'slider-locations'" "$ROOT/includes/class-smart-hero.php"
           grep -Fq "'_nectar_slider_image'" "$ROOT/includes/class-smart-hero.php"
           grep -Fq "'_nectar_slider_heading'" "$ROOT/includes/class-smart-hero.php"
           grep -Fq "'_nectar_slider_caption'" "$ROOT/includes/class-smart-hero.php"
