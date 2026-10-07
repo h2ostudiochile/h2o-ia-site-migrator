@@ -114,7 +114,6 @@ jobs:
                   $GLOBALS['opts'][ $key ] = $value;
                   return true;
               }
-              function gmdate( $format ) { return '2026-10-07T16:00:00+00:00'; }
               function wp_update_post( $postarr, $wp_error = false ) {
                   $GLOBALS['page_writes']++;
                   return (int) ( $postarr['ID'] ?? 0 );
