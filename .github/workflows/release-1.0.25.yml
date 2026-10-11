@@ -1,0 +1,559 @@
+name: Test and release h2o IA Site Migrator 1.0.25
+
+on:
+  push:
+    branches:
+      - main
+      - fix/native-salient-sections-1.0.25
+    paths:
+      - '.github/workflows/release-1.0.25.yml'
+      - 'bootstrap/trigger-1.0.25.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h2o-ia-site-migrator-1.0.25-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native Salient section compiler 1.0.25
+        shell: bash
+        run: |
+          set -Euo pipefail
+          trap 'rc=$?; echo "FAILED line $LINENO: $BASH_COMMAND"; exit "$rc"' ERR
+
+          BASE_VERSION="1.0.24"
+          VERSION="1.0.25"
+          WORK="$RUNNER_TEMP/h2osm-$VERSION"
+          DIST="$GITHUB_WORKSPACE/dist-1025"
+
+          rm -rf "$WORK" "$DIST"
+          mkdir -p "$WORK/current" "$DIST/parts"
+
+          cat bootstrap/$BASE_VERSION/part-*.b64 | tr -d '\n\r ' | base64 --decode > "$WORK/current.zip"
+          unzip -q "$WORK/current.zip" -d "$WORK/current"
+          ROOT="$WORK/current/h2o-ia-site-migrator"
+
+          cat > "$ROOT/includes/class-native-salient-structure.php" <<'PHP'
+          <?php
+          namespace H2O\Site_Migrator;
+
+          if ( ! defined( 'ABSPATH' ) ) {
+              exit;
+          }
+
+          /**
+           * Canonical native-Salient structure compiler.
+           *
+           * Rules:
+           * - structural WPBakery/Salient shortcodes are never allowed inside a text block;
+           * - no h2osm-* classes or migration CSS hooks survive in migrated content;
+           * - pretitles are semantic H6, never styled paragraphs;
+           * - page title stays H1, section titles H2 and deeper levels H3+;
+           * - headings never end in a period;
+           * - image-led bands use native Salient vc_row options:
+           *   Full Width Background + CSS background image + gradient overlay +
+           *   Heavy overlay + Light text + native top/bottom padding.
+           *
+           * Existing pages are repaired from their CURRENT content only. This
+           * class never reloads a profile and never replaces editor copy.
+           */
+          final class Native_Salient_Structure {
+              private const STATE_OPTION = 'h2osm_native_salient_structure_v1';
+              private const VERSION = '1.0.25';
+
+              public static function register(): void {
+                  add_action( 'admin_init', array( __CLASS__, 'maybe_upgrade_existing' ), 1260 );
+              }
+
+              public static function maybe_upgrade_existing(): void {
+                  if ( ! current_user_can( 'manage_options' ) ) {
+                      return;
+                  }
+
+                  $state = get_option( self::STATE_OPTION, array() );
+                  if ( is_array( $state ) && self::VERSION === (string) ( $state['version'] ?? '' ) ) {
+                      return;
+                  }
+
+                  $changed = 0;
+                  foreach ( Sync::managed_page_ids() as $page_id ) {
+                      $post = get_post( $page_id );
+                      if ( ! $post instanceof \WP_Post || 'page' !== $post->post_type ) {
+                          continue;
+                      }
+
+                      $before = (string) $post->post_content;
+                      if ( ! self::needs_repair( $before ) ) {
+                          continue;
+                      }
+
+                      $after = self::normalize_content( $before );
+                      if ( $after === $before ) {
+                          continue;
+                      }
+
+                      $result = wp_update_post(
+                          wp_slash(
+                              array(
+                                  'ID' => (int) $post->ID,
+                                  'post_content' => $after,
+                              )
+                          ),
+                          true
+                      );
+
+                      if ( ! is_wp_error( $result ) ) {
+                          $changed++;
+                      }
+                  }
+
+                  update_option(
+                      self::STATE_OPTION,
+                      array(
+                          'version' => self::VERSION,
+                          'status' => 'completed',
+                          'pages_changed' => $changed,
+                          'updated_at' => gmdate( 'c' ),
+                          'content_source' => 'current_editor_content_only',
+                      ),
+                      false
+                  );
+              }
+
+              public static function normalize_content( string $content ): string {
+                  $content = self::unwrap_structural_shortcodes_from_text_blocks( $content );
+
+                  $content = preg_replace_callback(
+                      '/\[vc_row\b([^\]]*)\]/i',
+                      static fn( array $m ): string => self::normalize_row_opening( (string) $m[1] ),
+                      $content
+                  );
+
+                  // Migration-specific shortcode classes are forbidden.
+                  $content = preg_replace( '/\s+el_class=(["\'])[^"\']*\bh2osm-[^"\']*\1/i', '', (string) $content );
+
+                  // Convert explicit migration pretitles to semantic H6 before
+                  // removing the old class hooks.
+                  $content = preg_replace(
+                      '/<p\b[^>]*class=(["\'])[^"\']*\bh2osm-eyebrow\b[^"\']*\1[^>]*>(.*?)<\/p>/is',
+                      '<h6>$2</h6>',
+                      (string) $content
+                  );
+                  $content = preg_replace(
+                      '/<span\b[^>]*class=(["\'])[^"\']*\bh2osm-eyebrow\b[^"\']*\1[^>]*>(.*?)<\/span>/is',
+                      '<h6>$2</h6>',
+                      (string) $content
+                  );
+
+                  // Generic editorial rule: a short leading paragraph directly
+                  // before H1/H2 is a pretitle and becomes H6.
+                  $content = preg_replace_callback(
+                      '/\[vc_column_text\b([^\]]*)\](.*?)\[\/vc_column_text\]/is',
+                      static function ( array $m ): string {
+                          $body = self::normalize_text_body( (string) $m[2] );
+                          $attrs = self::clean_text_block_attrs( (string) $m[1] );
+                          return '[vc_column_text' . $attrs . ']' . $body . '[/vc_column_text]';
+                      },
+                      (string) $content
+                  );
+
+                  // Remove any remaining migration-created HTML classes while
+                  // preserving non-H2O classes that may have been added manually.
+                  $content = preg_replace_callback(
+                      '/\sclass=(["\'])(.*?)\1/i',
+                      static function ( array $m ): string {
+                          $tokens = preg_split( '/\s+/', trim( (string) $m[2] ) ) ?: array();
+                          $tokens = array_values(
+                              array_filter(
+                                  $tokens,
+                                  static fn( string $token ): bool => ! str_starts_with( strtolower( $token ), 'h2osm-' )
+                              )
+                          );
+                          return empty( $tokens ) ? '' : ' class="' . esc_attr( implode( ' ', $tokens ) ) . '"';
+                      },
+                      (string) $content
+                  );
+
+                  // Remove obsolete migration wrapper tags that no longer have a
+                  // semantic role. Text/heading/link/img semantics remain.
+                  $content = preg_replace( '/<\/?(?:section|div)\b[^>]*>/i', '', (string) $content );
+
+                  // Headings and subtitles do not finish with a period.
+                  $content = preg_replace_callback(
+                      '/<h([1-6])\b([^>]*)>(.*?)<\/h\1>/is',
+                      static function ( array $m ): string {
+                          $inner = trim( (string) $m[3] );
+                          $inner = preg_replace( '/\.\s*(<\/a>)?\s*$/i', '$1', $inner );
+                          return '<h' . $m[1] . $m[2] . '>' . $inner . '</h' . $m[1] . '>';
+                      },
+                      (string) $content
+                  );
+
+                  return trim( (string) $content );
+              }
+
+              private static function normalize_text_body( string $body ): string {
+                  // Structural shortcodes are not valid text content.
+                  if ( preg_match( '/\[(?:vc_row|vc_column|vc_row_inner|vc_column_inner)\b/i', $body ) ) {
+                      return $body;
+                  }
+
+                  // Strip custom styles/classes from text semantics.
+                  $body = preg_replace( '/\sclass=(["\'])[^"\']*\1/i', '', $body );
+                  $body = preg_replace( '/\sstyle=(["\'])[^"\']*\1/i', '', (string) $body );
+
+                  // A short first paragraph immediately followed by H1/H2 is a pretitle.
+                  $body = preg_replace_callback(
+                      '/^\s*<p\b[^>]*>(.*?)<\/p>\s*(?=<h[12]\b)/is',
+                      static function ( array $m ): string {
+                          $text = trim( wp_strip_all_tags( (string) $m[1] ) );
+                          if ( '' === $text || mb_strlen( $text ) > 110 ) {
+                              return (string) $m[0];
+                          }
+                          return '<h6>' . esc_html( $text ) . '</h6>';
+                      },
+                      (string) $body
+                  );
+
+                  return (string) $body;
+              }
+
+              private static function clean_text_block_attrs( string $attrs ): string {
+                  $attrs = preg_replace( '/\s+(?:el_class|css|css_animation)=(["\']).*?\1/i', '', $attrs );
+                  $attrs = trim( (string) $attrs );
+                  return '' === $attrs ? '' : ' ' . $attrs;
+              }
+
+              private static function unwrap_structural_shortcodes_from_text_blocks( string $content ): string {
+                  for ( $i = 0; $i < 6; $i++ ) {
+                      $before = $content;
+                      $content = preg_replace_callback(
+                          '/\[vc_column_text\b[^\]]*\](.*?)\[\/vc_column_text\]/is',
+                          static function ( array $m ): string {
+                              $body = trim( (string) $m[1] );
+                              if (
+                                  preg_match( '/^\[(?:vc_row|vc_row_inner|vc_column|vc_column_inner)\b/i', $body ) &&
+                                  preg_match( '/\[\/(?:vc_row|vc_row_inner|vc_column|vc_column_inner)\]\s*$/i', $body )
+                              ) {
+                                  return $body;
+                              }
+                              return (string) $m[0];
+                          },
+                          (string) $content
+                      );
+                      if ( $content === $before ) {
+                          break;
+                      }
+                  }
+                  return (string) $content;
+              }
+
+              private static function normalize_row_opening( string $raw_attrs ): string {
+                  $attrs = trim( $raw_attrs );
+
+                  // Never carry a migration class into Salient.
+                  $attrs = preg_replace( '/\s*el_class=(["\'])[^"\']*\bh2osm-[^"\']*\1/i', '', $attrs );
+
+                  $bg = self::attr_value( $attrs, 'bg_image' );
+                  if ( '' === $bg ) {
+                      return '[vc_row' . ( '' !== trim( $attrs ) ? ' ' . trim( $attrs ) : '' ) . ']';
+                  }
+
+                  if ( preg_match( '#^https?://#i', $bg ) ) {
+                      $attachment_id = (int) attachment_url_to_postid( $bg );
+                      if ( $attachment_id > 0 ) {
+                          $bg = (string) $attachment_id;
+                      }
+                  }
+
+                  $native = array(
+                      'type' => 'full_width_background',
+                      'full_screen_row_position' => 'middle',
+                      'bg_image' => $bg,
+                      'bg_position' => 'center center',
+                      'background_image_loading' => 'default',
+                      'bg_repeat' => 'no-repeat',
+                      'scene_position' => 'center',
+                      'top_padding' => '140',
+                      'constrain_group_1' => 'yes',
+                      'bottom_padding' => '140',
+                      'text_color' => 'light',
+                      'text_align' => 'left',
+                      'row_border_radius' => 'none',
+                      'row_border_radius_applies' => 'bg',
+                      'overflow' => 'visible',
+                      'enable_gradient' => 'true',
+                      'color_overlay' => '#000000',
+                      'color_overlay_2' => 'rgba(0,0,0,0)',
+                      'advanced_gradient_angle' => '0',
+                      'overlay_strength' => '0.8',
+                      'gradient_direction' => 'left_to_right',
+                      'shape_divider_position' => 'bottom',
+                      'bg_image_animation' => 'none',
+                      'gradient_type' => 'default',
+                  );
+
+                  // Strip the attributes this compiler owns, then append the
+                  // canonical native Salient values.
+                  foreach ( array_keys( $native ) as $name ) {
+                      $attrs = preg_replace(
+                          '/(?:^|\s)' . preg_quote( $name, '/' ) . '=(["\']).*?\1/i',
+                          '',
+                          (string) $attrs
+                      );
+                  }
+                  $attrs = preg_replace( '/\s+/', ' ', trim( (string) $attrs ) );
+
+                  $parts = array();
+                  foreach ( $native as $name => $value ) {
+                      $parts[] = $name . '="' . esc_attr( $value ) . '"';
+                  }
+
+                  return '[vc_row' . ( '' !== $attrs ? ' ' . $attrs : '' ) . ' ' . implode( ' ', $parts ) . ']';
+              }
+
+              private static function attr_value( string $attrs, string $name ): string {
+                  if ( preg_match( '/(?:^|\s)' . preg_quote( $name, '/' ) . '=(["\'])(.*?)\1/i', $attrs, $m ) ) {
+                      return trim( html_entity_decode( (string) $m[2], ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
+                  }
+                  return '';
+              }
+
+              private static function needs_repair( string $content ): bool {
+                  return
+                      false !== stripos( $content, 'h2osm-' ) ||
+                      (bool) preg_match( '/\[vc_column_text\b[^\]]*\].*?\[(?:vc_row|vc_column|vc_row_inner|vc_column_inner)\b/is', $content ) ||
+                      (bool) preg_match( '/\[vc_row\b(?=[^\]]*\bbg_image=(["\'])[^"\']+\1)(?![^\]]*\btype="full_width_background")/i', $content ) ||
+                      (bool) preg_match( '/<h[1-6]\b[^>]*>.*?\.\s*<\/h[1-6]>/is', $content );
+              }
+          }
+          PHP
+
+          python3 - "$ROOT" <<'PY'
+          import pathlib,re,sys
+          root=pathlib.Path(sys.argv[1])
+
+          main=root/'h2o-ia-site-migrator.php'
+          s=main.read_text().replace('Version: 1.0.24','Version: 1.0.25')
+          s=s.replace("define( 'H2OSM_VERSION', '1.0.24' );","define( 'H2OSM_VERSION', '1.0.25' );")
+          req="require_once H2OSM_DIR . 'includes/class-native-salient-structure.php';"
+          if req not in s:
+              needle="require_once H2OSM_DIR . 'includes/class-content-normalizer.php';"
+              if needle not in s: raise SystemExit('NORMALIZER_REQUIRE_NOT_FOUND')
+              s=s.replace(needle,needle+"\n"+req,1)
+          call=r"\H2O\Site_Migrator\Native_Salient_Structure::register();"
+          if call not in s:
+              s += "\n"+call+"\n"
+          main.write_text(s)
+
+          sync=root/'includes/class-sync.php'
+          s=sync.read_text()
+          needle="$content = Content_Normalizer::normalize( $content );"
+          native="$content = Native_Salient_Structure::normalize_content( $content );"
+          if native not in s:
+              if needle not in s: raise SystemExit('NORMALIZER_HOOK_NOT_FOUND')
+              s=s.replace(needle,native+"\n            "+needle,1)
+          sync.write_text(s)
+
+          profile=root/'profiles/templa-design.php'
+          p=profile.read_text().replace('1.0.24','1.0.25')
+          # Source profile is also cleaned so future audits show native intent.
+          p=re.sub(r'<p\s+class="[^"]*h2osm-eyebrow[^"]*">(.*?)</p>',r'<h6>\1</h6>',p,flags=re.I|re.S)
+          p=re.sub(r'\s+el_class="[^"]*h2osm-[^"]*"','',p,flags=re.I)
+          def clean_class(m):
+              tokens=[t for t in m.group(1).split() if not t.lower().startswith('h2osm-')]
+              return (' class="'+ ' '.join(tokens) + '"') if tokens else ''
+          p=re.sub(r'\sclass="([^"]*)"',clean_class,p)
+          p=re.sub(r'(<h[1-6][^>]*>.*?)(\.)(</h[1-6]>)',r'\1\3',p,flags=re.I|re.S)
+          profile.write_text(p)
+
+          changelog=root/'CHANGELOG.md'
+          old=changelog.read_text() if changelog.exists() else ''
+          entry="""## 1.0.25 — 2026-10-11
+          - Regla estructural global: WPBakery/Salient shortcodes nunca se guardan dentro de un Text Block.
+          - Elimina clases h2osm-* y hooks CSS creados por el migrador.
+          - Pretítulos pasan a H6 semántico; títulos de página H1; secciones H2 y niveles inferiores H3+.
+          - Los headings no terminan en punto.
+          - Filas con imagen de fondo pasan a configuración Salient nativa: Full Width Background, CSS Background Image, gradient overlay negro, Heavy (0.8), texto Light y padding vertical base 140/140.
+          - La reparación 1.0.25 trabaja solo sobre el contenido actual del editor; no recarga perfiles ni reemplaza copy manual.
+          - Queda como regla canónica para todas las migraciones futuras.
+
+          """
+          changelog.write_text(entry+old)
+          PY
+
+          php -l "$ROOT/includes/class-native-salient-structure.php"
+          php -l "$ROOT/includes/class-sync.php"
+          php -l "$ROOT/h2o-ia-site-migrator.php"
+          php -l "$ROOT/profiles/templa-design.php"
+
+          cat > "$WORK/test-native-salient.php" <<'PHP'
+          <?php
+          namespace {
+              define('ABSPATH',__DIR__.'/');
+              function add_action(...$x){}
+              function current_user_can($c){return true;}
+              function get_option($k,$d=false){return $d;}
+              function update_option($k,$v,$a=null){return true;}
+              function attachment_url_to_postid($u){return str_contains($u,'INTERIOR-VRESION-2.webp')?777:0;}
+              function esc_attr($v){return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8');}
+              function esc_html($v){return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8');}
+              function wp_strip_all_tags($v){return strip_tags((string)$v);}
+              function wp_slash($v){return $v;}
+              function is_wp_error($v){return false;}
+          }
+          namespace H2O\Site_Migrator {
+              final class Sync { public static function managed_page_ids(): array { return array(); } }
+          }
+          namespace {
+              require getenv('H2OSM_ROOT').'/includes/class-native-salient-structure.php';
+
+              $input='[vc_row type="full_width_content" el_class="h2osm-bg-row" bg_image="https://templadesign.cl/wp-content/uploads/2024/11/INTERIOR-VRESION-2.webp" bg_position="center top" text_color="dark" top_padding="10%" bottom_padding="10%" overlay_strength="0.35"]'
+                    .'[vc_column width="1/1"][vc_column_text el_class="h2osm-copy" css=".bad{color:red}"]'
+                    .'<p class="h2osm-eyebrow h2osm-dark">Arquitectura interior · Construcción · Mobiliario</p>'
+                    .'<h1>Servicios.</h1><p>De la idea al espacio terminado.</p>'
+                    .'[/vc_column_text][/vc_column][/vc_row]';
+
+              $out=\H2O\Site_Migrator\Native_Salient_Structure::normalize_content($input);
+
+              $must=[
+                  'type="full_width_background"',
+                  'bg_image="777"',
+                  'bg_position="center center"',
+                  'bg_repeat="no-repeat"',
+                  'background_image_loading="default"',
+                  'top_padding="140"',
+                  'bottom_padding="140"',
+                  'text_color="light"',
+                  'enable_gradient="true"',
+                  'color_overlay="#000000"',
+                  'color_overlay_2="rgba(0,0,0,0)"',
+                  'overlay_strength="0.8"',
+                  '<h6>Arquitectura interior · Construcción · Mobiliario</h6>',
+                  '<h1>Servicios</h1>',
+                  '<p>De la idea al espacio terminado.</p>',
+              ];
+              foreach($must as $needle){
+                  if(!str_contains($out,$needle)){fwrite(STDERR,"MISSING:$needle\n$out\n");exit(1);}
+              }
+              foreach(['h2osm-','el_class=',' css=','<h1>Servicios.</h1>'] as $bad){
+                  if(str_contains($out,$bad)){fwrite(STDERR,"FORBIDDEN:$bad\n$out\n");exit(1);}
+              }
+
+              $nested='[vc_column_text][vc_row type="full_width_background"][vc_column][vc_column_text]<h2>Título.</h2>Texto[/vc_column_text][/vc_column][/vc_row][/vc_column_text]';
+              $fixed=\H2O\Site_Migrator\Native_Salient_Structure::normalize_content($nested);
+              if(str_contains($fixed,'[vc_column_text][vc_row')){
+                  fwrite(STDERR,"NESTED_SHORTCODE_REMAINS\n$fixed\n");exit(1);
+              }
+              if(!str_contains($fixed,'<h2>Título</h2>')){
+                  fwrite(STDERR,"HEADING_NORMALIZATION_FAIL\n$fixed\n");exit(1);
+              }
+
+              $manual='[vc_row type="full_width_background"][vc_column][vc_column_text]<h2>Texto manual</h2><p>Este texto lo editó Claudia y debe quedar idéntico</p>[/vc_column_text][/vc_column][/vc_row]';
+              $manual_out=\H2O\Site_Migrator\Native_Salient_Structure::normalize_content($manual);
+              if(!str_contains($manual_out,'Este texto lo editó Claudia y debe quedar idéntico')){
+                  fwrite(STDERR,"MANUAL_COPY_LOST\n");exit(1);
+              }
+
+              echo "SITE_MIGRATOR_1025_NATIVE_SALIENT_REFERENCE_OK\n";
+          }
+          PHP
+
+          H2OSM_ROOT="$ROOT" php "$WORK/test-native-salient.php"
+
+          # Profile/future migration rules.
+          ! grep -Fq 'class="h2osm-' "$ROOT/profiles/templa-design.php"
+          ! grep -Fq 'el_class="h2osm-' "$ROOT/profiles/templa-design.php"
+          ! grep -Eq '<p[^>]*h2osm-eyebrow' "$ROOT/profiles/templa-design.php"
+
+          python3 - "$ROOT/includes/class-sync.php" <<'PY'
+          import pathlib,sys
+          s=pathlib.Path(sys.argv[1]).read_text()
+          a=s.index('Native_Salient_Structure::normalize_content')
+          b=s.index('Content_Normalizer::normalize')
+          c=s.index('Content_Validator::validate')
+          if not (a < b < c):
+              raise SystemExit('NATIVE_STRUCTURE_PIPELINE_ORDER_INVALID')
+          print('NATIVE_STRUCTURE_PIPELINE_ORDER_OK')
+          PY
+
+          (cd "$WORK/current" && zip -qr "$DIST/h2o-ia-site-migrator-$VERSION.zip" h2o-ia-site-migrator)
+          SHA="$(sha256sum "$DIST/h2o-ia-site-migrator-$VERSION.zip" | awk '{print $1}')"
+          echo "$SHA" > "$DIST/package.sha256"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          base64 -w0 "$DIST/h2o-ia-site-migrator-$VERSION.zip" > "$DIST/package.b64"
+          split -b 5000 -d -a 2 "$DIST/package.b64" "$DIST/parts/raw-"
+
+          python3 - "$VERSION" "$SHA" "$DIST" <<'PY'
+          import json,pathlib,sys
+          version,sha,dist=sys.argv[1],sys.argv[2],pathlib.Path(sys.argv[3])
+          raw=sorted((dist/'parts').glob('raw-*'))
+          parts=[f'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/{version}/part-{i:02d}.b64' for i in range(1,len(raw)+1)]
+          bootstrap={'version':version,'package_id':'https://raw.githubusercontent.com/h2ostudiochile/h2o-ia-site-migrator/main/bootstrap/package.sha256','package_sha256':sha,'parts':parts,'tested':'7.1','requires_php':'8.0'}
+          release={'version':version,'package_url':f'https://github.com/h2ostudiochile/h2o-ia-site-migrator/releases/download/v{version}/h2o-ia-site-migrator-{version}.zip','package_sha256':sha,'tested':'7.1','requires_php':'8.0'}
+          (dist/'release-bootstrap.json').write_text(json.dumps(bootstrap,indent=2)+'\n')
+          (dist/'release.json').write_text(json.dumps(release,indent=2)+'\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h2o-ia-site-migrator-1.0.25-tested
+          path: |
+            dist-1025/h2o-ia-site-migrator-1.0.25.zip
+            dist-1025/release.json
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          PACKAGE="dist-1025/h2o-ia-site-migrator-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PACKAGE" dist-1025/release.json --clobber
+          else
+            gh release create "$TAG" "$PACKAGE" dist-1025/release.json \
+              --target main \
+              --title "h2o IA Site Migrator $VERSION" \
+              --notes "Estructura Salient nativa: filas con imagen como Full Width Background + gradient overlay Heavy + Light text + padding nativo; H6 para pretítulos; sin clases h2osm ni shortcodes estructurales dentro de Text Blocks."
+          fi
+
+      - name: Publish updater chunks and manifest
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          put_file () {
+            path="$1"; file="$2"; msg="$3"
+            encoded="$(base64 -w0 "$file")"
+            sha="$(gh api "repos/$REPO/contents/$path?ref=main" --jq '.sha' 2>/dev/null || true)"
+            if [ -n "$sha" ]; then
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f sha="$sha" -f branch="main" >/dev/null
+            else
+              gh api --method PUT "repos/$REPO/contents/$path" -f message="$msg" -f content="$encoded" -f branch="main" >/dev/null
+            fi
+          }
+          i=1
+          for f in $(find dist-1025/parts -type f -name 'raw-*' | sort); do
+            target="$(printf 'bootstrap/%s/part-%02d.b64' "$VERSION" "$i")"
+            put_file "$target" "$f" "Site Migrator $VERSION package part $i"
+            i=$((i+1))
+          done
+          put_file "bootstrap/package.sha256" "dist-1025/package.sha256" "Site Migrator $VERSION checksum"
+          put_file "bootstrap/release.json" "dist-1025/release-bootstrap.json" "Publish Site Migrator $VERSION updater manifest"
