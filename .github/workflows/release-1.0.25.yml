@@ -460,10 +460,12 @@ jobs:
                   fwrite(STDERR,"HEADING_NORMALIZATION_FAIL\n$fixed\n");exit(1);
               }
 
-              $manual='[vc_row type="full_width_background"][vc_column][vc_column_text]<h2>Texto manual</h2><p>Este texto lo editó Claudia y debe quedar idéntico</p>[/vc_column_text][/vc_column][/vc_row]';
-              $manual_out=\H2O\Site_Migrator\Native_Salient_Structure::normalize_content($manual);
-              if(!str_contains($manual_out,'Este texto lo editó Claudia y debe quedar idéntico')){
-                  fwrite(STDERR,"MANUAL_COPY_LOST\n");exit(1);
+              $manual='[vc_row type="full_width_background"][vc_column][vc_column_text el_class="clase-manual" css=".manual{padding:2px}"]<h2 class="titulo-manual">Texto manual</h2><p style="letter-spacing:1px">Este texto lo editó Claudia y debe quedar idéntico</p>[/vc_column_text][/vc_column][/vc_row]';
+              $manual_out=\H2O\Site_Migrator\Native_Salient_Structure::normalize_content($manual,true);
+              foreach(['Este texto lo editó Claudia y debe quedar idéntico','el_class="clase-manual"','css=".manual{padding:2px}"','class="titulo-manual"','style="letter-spacing:1px"'] as $manual_expected){
+                  if(!str_contains($manual_out,$manual_expected)){
+                      fwrite(STDERR,"MANUAL_OVERRIDE_LOST:$manual_expected\n$manual_out\n");exit(1);
+                  }
               }
 
               echo "SITE_MIGRATOR_1025_NATIVE_SALIENT_REFERENCE_OK\n";
