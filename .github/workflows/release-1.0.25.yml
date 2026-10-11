@@ -183,10 +183,6 @@ jobs:
                       (string) $content
                   );
 
-                  // Remove obsolete migration wrapper tags that no longer have a
-                  // semantic role. Text/heading/link/img semantics remain.
-                  $content = preg_replace( '/<\/?(?:section|div)\b[^>]*>/i', '', (string) $content );
-
                   // Headings and subtitles do not finish with a period.
                   $content = preg_replace_callback(
                       '/<h([1-6])\b([^>]*)>(.*?)<\/h\1>/is',
@@ -226,8 +222,12 @@ jobs:
                   return (string) $body;
               }
 
-              private static function clean_text_block_attrs( string $attrs ): string {
-                  $attrs = preg_replace( '/\s+(?:el_class|css|css_animation)=(["\']).*?\1/i', '', $attrs );
+              private static function clean_text_block_attrs( string $attrs, bool $preserve_editor_overrides ): string {
+                  if ( $preserve_editor_overrides ) {
+                      $attrs = preg_replace( '/\s+el_class=(["\'])[^"\']*\bh2osm-[^"\']*\1/i', '', $attrs );
+                  } else {
+                      $attrs = preg_replace( '/\s+(?:el_class|css|css_animation)=(["\']).*?\1/i', '', $attrs );
+                  }
                   $attrs = trim( (string) $attrs );
                   return '' === $attrs ? '' : ' ' . $attrs;
               }
