@@ -234,22 +234,24 @@ jobs:
               }
 
               private static function unwrap_structural_shortcodes_from_text_blocks( string $content ): string {
-                  for ( $i = 0; $i < 6; $i++ ) {
+                  for ( $i = 0; $i < 8; $i++ ) {
                       $before = $content;
-                      $content = preg_replace_callback(
-                          '/\[vc_column_text\b[^\]]*\](.*?)\[\/vc_column_text\]/is',
-                          static function ( array $m ): string {
-                              $body = trim( (string) $m[1] );
-                              if (
-                                  preg_match( '/^\[(?:vc_row|vc_row_inner|vc_column|vc_column_inner)\b/i', $body ) &&
-                                  preg_match( '/\[\/(?:vc_row|vc_row_inner|vc_column|vc_column_inner)\]\s*$/i', $body )
-                              ) {
-                                  return $body;
-                              }
-                              return (string) $m[0];
-                          },
+
+                      // A whole structural container accidentally serialized as
+                      // Text Block content. This pattern intentionally spans
+                      // nested vc_column_text elements inside the row.
+                      $content = preg_replace(
+                          '/\\[vc_column_text\\b[^\\]]*\\]\\s*(\\[(vc_row|vc_row_inner)\\b.*?\\[\\/\\2\\])\\s*\\[\\/vc_column_text\\]/is',
+                          '$1',
                           (string) $content
                       );
+
+                      $content = preg_replace(
+                          '/\\[vc_column_text\\b[^\\]]*\\]\\s*(\\[(vc_column|vc_column_inner)\\b.*?\\[\\/\\2\\])\\s*\\[\\/vc_column_text\\]/is',
+                          '$1',
+                          (string) $content
+                      );
+
                       if ( $content === $before ) {
                           break;
                       }
