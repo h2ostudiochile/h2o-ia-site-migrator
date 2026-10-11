@@ -202,16 +202,15 @@ jobs:
               }
 
               private static function normalize_text_body( string $body, bool $preserve_editor_overrides ): string {
-                  // Structural shortcodes are not valid text content.
                   if ( preg_match( '/\[(?:vc_row|vc_column|vc_row_inner|vc_column_inner)\b/i', $body ) ) {
                       return $body;
                   }
 
-                  // Strip custom styles/classes from text semantics.
-                  $body = preg_replace( '/\sclass=(["\'])[^"\']*\1/i', '', $body );
-                  $body = preg_replace( '/\sstyle=(["\'])[^"\']*\1/i', '', (string) $body );
+                  if ( ! $preserve_editor_overrides ) {
+                      $body = preg_replace( '/\sclass=(["\'])[^"\']*\1/i', '', $body );
+                      $body = preg_replace( '/\sstyle=(["\'])[^"\']*\1/i', '', (string) $body );
+                  }
 
-                  // A short first paragraph immediately followed by H1/H2 is a pretitle.
                   $body = preg_replace_callback(
                       '/^\s*<p\b[^>]*>(.*?)<\/p>\s*(?=<h[12]\b)/is',
                       static function ( array $m ): string {
