@@ -96,7 +96,7 @@ jobs:
                           continue;
                       }
 
-                      $after = self::normalize_content( $before );
+                      $after = self::normalize_content( $before, true );
                       if ( $after === $before ) {
                           continue;
                       }
@@ -129,7 +129,7 @@ jobs:
                   );
               }
 
-              public static function normalize_content( string $content ): string {
+              public static function normalize_content( string $content, bool $preserve_editor_overrides = false ): string {
                   $content = self::unwrap_structural_shortcodes_from_text_blocks( $content );
 
                   $content = preg_replace_callback(
@@ -158,9 +158,9 @@ jobs:
                   // before H1/H2 is a pretitle and becomes H6.
                   $content = preg_replace_callback(
                       '/\[vc_column_text\b([^\]]*)\](.*?)\[\/vc_column_text\]/is',
-                      static function ( array $m ): string {
-                          $body = self::normalize_text_body( (string) $m[2] );
-                          $attrs = self::clean_text_block_attrs( (string) $m[1] );
+                      static function ( array $m ) use ( $preserve_editor_overrides ): string {
+                          $body = self::normalize_text_body( (string) $m[2], $preserve_editor_overrides );
+                          $attrs = self::clean_text_block_attrs( (string) $m[1], $preserve_editor_overrides );
                           return '[vc_column_text' . $attrs . ']' . $body . '[/vc_column_text]';
                       },
                       (string) $content
@@ -201,7 +201,7 @@ jobs:
                   return trim( (string) $content );
               }
 
-              private static function normalize_text_body( string $body ): string {
+              private static function normalize_text_body( string $body, bool $preserve_editor_overrides ): string {
                   // Structural shortcodes are not valid text content.
                   if ( preg_match( '/\[(?:vc_row|vc_column|vc_row_inner|vc_column_inner)\b/i', $body ) ) {
                       return $body;
