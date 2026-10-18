@@ -1,0 +1,60 @@
+name: H2O · Límite global de comunicaciones
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  forbid-direct-delivery:
+    name: Prohibir nuevos envíos fuera de Communicator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Auditar cambios de código
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess, sys
+          base=os.environ.get("BASE_SHA","")
+          head=os.environ.get("HEAD_SHA","HEAD")
+          if not re.fullmatch(r"[a-f0-9]{40}",base or "") or base=="0"*40:
+              base=subprocess.check_output(["git","rev-parse","HEAD^"],text=True).strip()
+          output=subprocess.check_output(
+              ["git","diff","--unified=0","--no-ext-diff",base,head,"--","*.php","*.js","*.mjs","*.ts","*.tsx","*.jsx"],
+              text=True,errors="replace"
+          )
+          current=""
+          violations=[]
+          patterns=[
+              ("WordPress mail",re.compile(r"\bwp_mail\s*\(",re.I)),
+              ("PHP mail",re.compile(r"(?<![\w>.])\bmail\s*\(",re.I)),
+              ("WordPress SMTP hook",re.compile(r"\b(?:phpmailer_init|pre_wp_mail|wp_mail_smtp)\b",re.I)),
+              ("Mailer propio",re.compile(r"\b(?:new\s+\\?PHPMailer|nodemailer|@sendgrid/mail|mailgun-js)\b",re.I)),
+              ("Internos de Communicator",re.compile(r"\bH2OC_[A-Za-z_]+::"))
+          ]
+          for line in output.splitlines():
+              if line.startswith("+++ b/"):
+                  current=line[6:]
+                  continue
+              if not current or not line.startswith("+") or line.startswith("+++"):
+                  continue
+              if current.startswith(("tests/","test/","docs/","vendor/","node_modules/",".github/")):
+                  continue
+              code=line[1:].strip()
+              if not code or code.startswith(("//","/*","*","#")):
+                  continue
+              for name,regex in patterns:
+                  if regex.search(code):
+                      violations.append((current,name,code[:180]))
+          for path,name,code in violations:
+              print(f"::error file={path}::{name}: {code}")
+          if violations:
+              print("Los avisos transaccionales H2O deben enviarse mediante contratos públicos de h2o Communicator. Los proveedores y sus credenciales pertenecen exclusivamente a Communicator.")
+              sys.exit(1)
+          print("OK: no se introdujeron rutas directas de correo ni dependencias internas de Communicator.")
+          PY
